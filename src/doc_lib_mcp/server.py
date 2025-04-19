@@ -611,6 +611,22 @@ async def handle_call_tool(
                 cur.close()
                 conn.close()
                 results.append(f"{path}: Ingested {len(chunks)} Python chunk(s)")
+            elif path.endswith(".html"):
+                with open(path, "r", encoding="utf-8") as f:
+                    html = f.read()
+                chunks = chunk_html(html, source=path)
+                embeddings = await embed_texts([c["content"] for c in chunks])
+                conn = get_db_conn()
+                cur = conn.cursor()
+                for chunk, emb in zip(chunks, embeddings):
+                    cur.execute(
+                        "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
+                    )
+                conn.commit()
+                cur.close()
+                conn.close()
+                results.append(f"{path}: Ingested {len(chunks)} HTML chunk(s)")
             else:
                 results.append(f"{path}: Unsupported file type")
         return [types.TextContent(type="text", text="\n".join(results))]
