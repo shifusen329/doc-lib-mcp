@@ -1,0 +1,26 @@
+[project]
+name = "doc-lib-mcp"
+version = "0.1.0"
+description = "A MCP server project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.6.0",
+    "beautifulsoup4",
+    "lxml",
+    "anyio",
+    "python-dotenv",
+    "httpx",
+    "psycopg2-binary",
+    "playwright"
+]
+[[project.authors]]
+name = "shifusen329"
+email = "quanhong329@gmail.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+doc-lib-mcp = "doc_lib_mcp:main"
