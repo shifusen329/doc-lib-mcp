@@ -76,6 +76,7 @@ async def embed_texts(texts):
 from .chunkers import chunk_markdown, chunk_python, chunk_openapi, chunk_html
 import json
 import os
+import readability # Added import
 
 server = Server("doc-lib-mcp")
 
@@ -275,6 +276,10 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "integer",
                         "description": "Number of top results to return.",
                         "default": 3
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Optional: Filter results by chunk type (e.g., 'code', 'html', 'markdown')."
                     }
                 },
                 "required": ["query"],
@@ -334,6 +339,25 @@ async def handle_list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["id", "metadata"],
+            },
+        ),
+        types.Tool(
+            name="tag-chunks-by-source",
+            description="Adds specified tags to the metadata of all chunks associated with a given source (URL or file path). Merges with existing tags.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "The source identifier (URL or file path) of the chunks to tag."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of tags to add."
+                    }
+                },
+                "required": ["source", "tags"],
             },
         ),
     ]
@@ -498,9 +522,29 @@ async def handle_call_tool(
                 return [types.TextContent(type="text", text=f"Failed to fetch dynamic HTML with Playwright: {e}")]
         if not html:
             return [types.TextContent(type="text", text="No HTML content fetched.")]
-        chunks = chunk_html(html, source=url)
+
+        # Clean HTML using readability
+        try:
+            doc = readability.Document(html)
+            cleaned_html = doc.summary()
+            title = doc.title() # Optionally capture title
+        except Exception as e:
+             return [types.TextContent(type="text", text=f"Failed to clean HTML with readability: {e}")]
+
+        if not cleaned_html:
+             return [types.TextContent(type="text", text="Readability could not extract main content.")]
+
+        # Chunk the cleaned HTML
+        chunks = chunk_html(cleaned_html, source=url)
         if not chunks:
-            return [types.TextContent(type="text", text="No content found to ingest from HTML.")]
+            return [types.TextContent(type="text", text="No content found to ingest from cleaned HTML.")]
+
+        # Add title to metadata of first chunk if available
+        if chunks and title:
+            if "metadata" not in chunks[0]:
+                chunks[0]["metadata"] = {}
+            chunks[0]["metadata"]["title"] = title
+
         embeddings = await embed_texts([c["content"] for c in chunks])
         conn = get_db_conn()
         cur = conn.cursor()
@@ -517,16 +561,26 @@ async def handle_call_tool(
     elif name == "search-chunks":
         query = arguments.get("query")
         top_k = arguments.get("top_k", 3)
+        filter_type = arguments.get("type") # Get optional type filter
         if not query:
             return [types.TextContent(type="text", text="Missing query argument.")]
+
         query_emb = (await embed_texts([query]))[0]
         embedding_str = "[" + ",".join(str(x) for x in query_emb) + "]"
         conn = get_db_conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT source, type, location, content, metadata, embedding <=> %s AS distance FROM chunks ORDER BY embedding <=> %s LIMIT %s",
-            (embedding_str, embedding_str, top_k)
-        )
+
+        sql_query = "SELECT source, type, location, content, metadata, embedding <=> %s AS distance FROM chunks"
+        params = [embedding_str]
+
+        if filter_type:
+            sql_query += " WHERE type = %s"
+            params.append(filter_type)
+
+        sql_query += " ORDER BY embedding <=> %s LIMIT %s"
+        params.extend([embedding_str, top_k])
+
+        cur.execute(sql_query, tuple(params))
         results = cur.fetchall()
         cur.close()
         conn.close()
@@ -661,6 +715,41 @@ async def handle_call_tool(
         cur.close()
         conn.close()
         return [types.TextContent(type="text", text=f"Updated metadata for chunk id {chunk_id}. Rows affected: {updated}")]
+
+    elif name == "tag-chunks-by-source":
+        source = arguments.get("source")
+        tags_to_add = arguments.get("tags")
+        if not source or not tags_to_add:
+            return [types.TextContent(type="text", text="Missing source or tags argument.")]
+        if not isinstance(tags_to_add, list):
+             return [types.TextContent(type="text", text="Tags argument must be a list of strings.")]
+
+        conn = get_db_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Fetch existing chunks for the source
+        cur.execute("SELECT id, metadata FROM chunks WHERE source = %s", (source,))
+        chunks_to_update = cur.fetchall()
+
+        updated_count = 0
+        for chunk in chunks_to_update:
+            chunk_id = chunk['id']
+            metadata = chunk['metadata'] if chunk['metadata'] else {}
+            existing_tags = set(metadata.get("tags", []))
+            new_tags = set(tags_to_add)
+            updated_tags = list(existing_tags.union(new_tags))
+
+            if list(existing_tags) != updated_tags: # Only update if tags actually changed
+                metadata["tags"] = updated_tags
+                cur.execute(
+                    "UPDATE chunks SET metadata = %s WHERE id = %s",
+                    (json.dumps(metadata), chunk_id)
+                )
+                updated_count += 1
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return [types.TextContent(type="text", text=f"Updated tags for {updated_count} chunk(s) from source: {source}")]
 
     else:
         raise ValueError(f"Unknown tool: {name}")

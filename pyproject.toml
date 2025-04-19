@@ -12,7 +12,8 @@ dependencies = [
     "python-dotenv",
     "httpx",
     "psycopg2-binary",
-    "playwright"
+    "playwright",
+    "readability-lxml"
 ]
 [[project.authors]]
 name = "shifusen329"

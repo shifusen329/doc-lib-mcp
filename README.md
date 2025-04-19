@@ -42,20 +42,25 @@ The server implements a wide range of tools:
 - **list-sources**: List all unique sources (file paths) that have been ingested and stored in memory
 - **update-chunk-metadata**: Update the metadata field for a chunk by id
   - Arguments: `id` (integer), `metadata` (object)
+- **tag-chunks-by-source**: Adds specified tags to the metadata of all chunks associated with a given source (URL or file path). Merges with existing tags.
+  - Arguments: `source` (string), `tags` (list of strings)
 
 #### Chunking and Code Extraction
 
 - Markdown, Python, OpenAPI, and HTML files are split into logical chunks for efficient retrieval and search.
-- The HTML chunker extracts code snippets from `<pre>` and `<code>` tags as dedicated "code" chunks, enabling code-only search and retrieval.
+- The HTML chunker uses the `readability-lxml` library to extract main content first.
+- It then extracts block code snippets from `<pre>` tags as dedicated "code" chunks. Inline `<code>` content remains part of the narrative chunks.
 
 #### Semantic Search
 
 - The `search-chunks` tool performs vector-based semantic search over all ingested content, returning the most relevant chunks for a given query.
+- It now supports an optional `type` argument to filter results by chunk type (e.g., `code`, `html`) before semantic ranking.
 
 #### Metadata Management
 
 - Chunks include a `metadata` field for categorization and tagging.
 - The `update-chunk-metadata` tool allows updating metadata for any chunk by its id.
+- The `tag-chunks-by-source` tool allows adding tags to all chunks from a specific source in one operation.
 
 ## Configuration
 

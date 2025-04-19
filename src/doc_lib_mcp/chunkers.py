@@ -186,22 +186,16 @@ def chunk_html(text: str, source: str) -> List[Dict[str, Any]]:
 
     chunks = []
 
-    # --- Extract code snippets as dedicated chunks ---
-    # Find all <pre> tags (which may contain <code>), and all <code> tags not inside <pre>
-    code_blocks = []
+    # --- Extract block code snippets (<pre>) as dedicated chunks ---
+    # Find all <pre> tags. Inline <code> tags will remain part of the narrative chunks.
+    pre_blocks = []
     for pre in content_root.find_all("pre"):
         code = pre.get_text(separator="\n", strip=True)
         if code:
-            code_blocks.append((pre, code))
-    for code_tag in content_root.find_all("code"):
-        # Skip <code> tags inside <pre>
-        if code_tag.find_parent("pre"):
-            continue
-        code = code_tag.get_text(separator="\n", strip=True)
-        if code:
-            code_blocks.append((code_tag, code))
+            pre_blocks.append((pre, code))
+    # Removed the loop for standalone `code` tags
 
-    for idx, (tag, code) in enumerate(code_blocks):
+    for idx, (tag, code) in enumerate(pre_blocks): # Changed code_blocks to pre_blocks
         chunks.append({
             "content": code,
             "type": "code",
@@ -209,7 +203,7 @@ def chunk_html(text: str, source: str) -> List[Dict[str, Any]]:
             "location": f"code:{idx+1}",
             "metadata": {"code_tag": True}
         })
-        tag.decompose()  # Remove code block from soup so it's not included in other chunks
+        # tag.decompose() # Removed: Keep code block in soup for narrative chunk context
 
     # --- Chunk the rest of the content as before ---
     headings = content_root.find_all(re.compile("^h[1-3]$"))
