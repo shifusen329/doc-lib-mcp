@@ -34,7 +34,12 @@ The server implements a wide range of tools:
 - **ingest-html-url**: Ingest and chunk HTML content from a URL (optionally using Playwright for dynamic content)
   - Arguments: `url` (string), `dynamic` (boolean, optional)
 - **search-chunks**: Semantic search over ingested content
-  - Arguments: `query` (string), `top_k` (integer, optional, default 3)
+  - Arguments: 
+    - `query` (string): The semantic search query.
+    - `top_k` (integer, optional, default 3): Number of top results to return.
+    - `type` (string, optional): Filter results by chunk type (e.g., `code`, `html`, `markdown`).
+    - `tag` (string, optional): Filter results by tag in chunk metadata.
+  - Returns the most relevant chunks for a given query, optionally filtered by type and/or tag.
 - **delete-source**: Delete all chunks from a given source
   - Arguments: `source` (string)
 - **ingest-batch**: Ingest and chunk multiple documentation files (markdown, OpenAPI JSON, Python) in batch
@@ -44,6 +49,7 @@ The server implements a wide range of tools:
   - Arguments: `id` (integer), `metadata` (object)
 - **tag-chunks-by-source**: Adds specified tags to the metadata of all chunks associated with a given source (URL or file path). Merges with existing tags.
   - Arguments: `source` (string), `tags` (list of strings)
+- **list-notes**: List all currently stored notes and their content.
 
 #### Chunking and Code Extraction
 
@@ -54,13 +60,14 @@ The server implements a wide range of tools:
 #### Semantic Search
 
 - The `search-chunks` tool performs vector-based semantic search over all ingested content, returning the most relevant chunks for a given query.
-- It now supports an optional `type` argument to filter results by chunk type (e.g., `code`, `html`) before semantic ranking.
+- Supports optional `type` and `tag` arguments to filter results by chunk type (e.g., `code`, `html`, `markdown`) and/or by tag in chunk metadata, before semantic ranking.
+- This enables highly targeted retrieval, such as "all code chunks tagged with 'langfuse' relevant to 'cost and usage'".
 
 #### Metadata Management
 
 - Chunks include a `metadata` field for categorization and tagging.
 - The `update-chunk-metadata` tool allows updating metadata for any chunk by its id.
-- The `tag-chunks-by-source` tool allows adding tags to all chunks from a specific source in one operation.
+- The `tag-chunks-by-source` tool allows adding tags to all chunks from a specific source in one operation. Tagging merges new tags with existing ones, preserving previous tags.
 
 ## Configuration
 

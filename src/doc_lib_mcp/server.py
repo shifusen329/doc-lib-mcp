@@ -264,7 +264,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search-chunks",
-            description="Semantic search over ingested content. Arguments: query (string), top_k (integer, optional, default 3).",
+            description="Semantic search over ingested content. Arguments: query (string), top_k (integer, optional, default 3), type (optional), tag (optional, filter by tag in chunk metadata).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -280,6 +280,10 @@ async def handle_list_tools() -> list[types.Tool]:
                     "type": {
                         "type": "string",
                         "description": "Optional: Filter results by chunk type (e.g., 'code', 'html', 'markdown')."
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional: Filter results by tag in chunk metadata."
                     }
                 },
                 "required": ["query"],
@@ -360,7 +364,41 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["source", "tags"],
             },
         ),
+        types.Tool(
+            name="list-notes",
+            description="List all currently stored notes and their content.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="get-chunks-by-type-and-source",
+            description="Retrieve all chunks of a specified type for a provided source id. Arguments: source (string), type (string).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "The source identifier (file path or URL) to filter by."
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "The chunk type to filter by (e.g., 'code', 'markdown', 'html')."
+                    }
+                },
+                "required": ["source", "type"],
+            },
+        ),
     ]
+
+SUPERCHUNK_SIZE = 500_000  # 500KB in characters
+
+def split_into_superchunks(text, size=SUPERCHUNK_SIZE):
+    """Yield (superchunk_index, superchunk_text) for each superchunk."""
+    for i in range(0, len(text), size):
+        yield (i // size, text[i:i+size])
 
 @server.call_tool()
 async def handle_call_tool(
@@ -394,12 +432,20 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
-        chunks = chunk_markdown(text, source=path)
-        embeddings = await embed_texts([chunk["content"] for chunk in chunks])
+        all_chunks = []
+        if len(text) > SUPERCHUNK_SIZE:
+            for superchunk_index, superchunk in split_into_superchunks(text):
+                for chunk in chunk_markdown(superchunk, source=path):
+                    chunk["metadata"] = chunk.get("metadata", {})
+                    chunk["metadata"]["superchunk_index"] = superchunk_index
+                    all_chunks.append(chunk)
+        else:
+            all_chunks = chunk_markdown(text, source=path)
+        embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
         cur = conn.cursor()
-        for chunk, emb in zip(chunks, embeddings):
+        for chunk, emb in zip(all_chunks, embeddings):
             cur.execute(
                 "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
                 (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
@@ -410,7 +456,7 @@ async def handle_call_tool(
         return [
             types.TextContent(
                 type="text",
-                text=f"Ingested {len(chunks)} markdown chunk(s) from {path}",
+                text=f"Ingested {len(all_chunks)} markdown chunk(s) from {path}",
             )
         ]
 
@@ -420,12 +466,20 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
             code = f.read()
-        chunks = chunk_python(code, source=path)
-        embeddings = await embed_texts([chunk["content"] for chunk in chunks])
+        all_chunks = []
+        if len(code) > SUPERCHUNK_SIZE:
+            for superchunk_index, superchunk in split_into_superchunks(code):
+                for chunk in chunk_python(superchunk, source=path):
+                    chunk["metadata"] = chunk.get("metadata", {})
+                    chunk["metadata"]["superchunk_index"] = superchunk_index
+                    all_chunks.append(chunk)
+        else:
+            all_chunks = chunk_python(code, source=path)
+        embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
         cur = conn.cursor()
-        for chunk, emb in zip(chunks, embeddings):
+        for chunk, emb in zip(all_chunks, embeddings):
             cur.execute(
                 "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
                 (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
@@ -436,7 +490,7 @@ async def handle_call_tool(
         return [
             types.TextContent(
                 type="text",
-                text=f"Ingested {len(chunks)} Python chunk(s) from {path}",
+                text=f"Ingested {len(all_chunks)} Python chunk(s) from {path}",
             )
         ]
 
@@ -445,13 +499,27 @@ async def handle_call_tool(
         if not path or not os.path.isfile(path):
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
-            openapi_json = json.load(f)
-        chunks = chunk_openapi(openapi_json, source=path)
-        embeddings = await embed_texts([chunk["content"] for chunk in chunks])
+            openapi_text = f.read()
+        all_chunks = []
+        if len(openapi_text) > SUPERCHUNK_SIZE:
+            for superchunk_index, superchunk in split_into_superchunks(openapi_text):
+                try:
+                    openapi_json = json.loads(superchunk)
+                except Exception:
+                    continue  # skip invalid JSON superchunks
+                for chunk in chunk_openapi(openapi_json, source=path):
+                    chunk["metadata"] = chunk.get("metadata", {})
+                    chunk["metadata"]["superchunk_index"] = superchunk_index
+                    all_chunks.append(chunk)
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                openapi_json = json.load(f)
+            all_chunks = chunk_openapi(openapi_json, source=path)
+        embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
         cur = conn.cursor()
-        for chunk, emb in zip(chunks, embeddings):
+        for chunk, emb in zip(all_chunks, embeddings):
             cur.execute(
                 "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
                 (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
@@ -462,7 +530,7 @@ async def handle_call_tool(
         return [
             types.TextContent(
                 type="text",
-                text=f"Ingested {len(chunks)} OpenAPI chunk(s) from {path}",
+                text=f"Ingested {len(all_chunks)} OpenAPI chunk(s) from {path}",
             )
         ]
 
@@ -472,12 +540,20 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
             html = f.read()
-        chunks = chunk_html(html, source=path)
-        embeddings = await embed_texts([chunk["content"] for chunk in chunks])
+        all_chunks = []
+        if len(html) > SUPERCHUNK_SIZE:
+            for superchunk_index, superchunk in split_into_superchunks(html):
+                for chunk in chunk_html(superchunk, source=path):
+                    chunk["metadata"] = chunk.get("metadata", {})
+                    chunk["metadata"]["superchunk_index"] = superchunk_index
+                    all_chunks.append(chunk)
+        else:
+            all_chunks = chunk_html(html, source=path)
+        embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
         cur = conn.cursor()
-        for chunk, emb in zip(chunks, embeddings):
+        for chunk, emb in zip(all_chunks, embeddings):
             cur.execute(
                 "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
                 (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
@@ -488,7 +564,7 @@ async def handle_call_tool(
         return [
             types.TextContent(
                 type="text",
-                text=f"Ingested {len(chunks)} HTML chunk(s) from {path}",
+                text=f"Ingested {len(all_chunks)} HTML chunk(s) from {path}",
             )
         ]
 
@@ -516,7 +592,13 @@ async def handle_call_tool(
                     browser = await p.chromium.launch(headless=True)
                     page = await browser.new_page()
                     await page.goto(url, timeout=30000)
-                    html = await page.content()
+                    # Wait for main docs content to load if dynamic retrieval is flagged
+                    await page.wait_for_selector('article', timeout=10000)
+                    # Extract only the main content node's inner HTML to reduce noise
+                    html = await page.eval_on_selector('article', 'el => el.innerHTML')
+                    if not html:
+                        # Fallback to full page content if selector fails
+                        html = await page.content()
                     await browser.close()
             except Exception as e:
                 return [types.TextContent(type="text", text=f"Failed to fetch dynamic HTML with Playwright: {e}")]
@@ -562,6 +644,7 @@ async def handle_call_tool(
         query = arguments.get("query")
         top_k = arguments.get("top_k", 3)
         filter_type = arguments.get("type") # Get optional type filter
+        tag = arguments.get("tag") # Get optional tag filter
         if not query:
             return [types.TextContent(type="text", text="Missing query argument.")]
 
@@ -572,10 +655,17 @@ async def handle_call_tool(
 
         sql_query = "SELECT source, type, location, content, metadata, embedding <=> %s AS distance FROM chunks"
         params = [embedding_str]
+        where_clauses = []
 
         if filter_type:
-            sql_query += " WHERE type = %s"
+            where_clauses.append("type = %s")
             params.append(filter_type)
+        if tag:
+            where_clauses.append("metadata->'tags' @> %s")
+            params.append(json.dumps([tag]))
+
+        if where_clauses:
+            sql_query += " WHERE " + " AND ".join(where_clauses)
 
         sql_query += " ORDER BY embedding <=> %s LIMIT %s"
         params.extend([embedding_str, top_k])
@@ -750,6 +840,44 @@ async def handle_call_tool(
         cur.close()
         conn.close()
         return [types.TextContent(type="text", text=f"Updated tags for {updated_count} chunk(s) from source: {source}")]
+
+    elif name == "list-notes":
+        if not notes:
+            return [types.TextContent(type="text", text="No notes found.")]
+        # Return notes as a JSON string for easy parsing, or format as needed
+        notes_content = json.dumps(notes, indent=2)
+        return [types.TextContent(type="text", text=notes_content)]
+
+    elif name == "get-chunks-by-type-and-source":
+        source = arguments.get("source")
+        chunk_type = arguments.get("type")
+        if not source or not chunk_type:
+            return [types.TextContent(type="text", text="Missing source or type argument.")]
+        conn = get_db_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, source, type, location, content, metadata FROM chunks WHERE source = %s AND type = %s",
+            (source, chunk_type)
+        )
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        if not results:
+            return [types.TextContent(type="text", text=f"No chunks found for source '{source}' with type '{chunk_type}'.")]
+        return [
+            types.TextContent(
+                type="text",
+                text=(
+                    f"ID: {row['id']}\n"
+                    f"Source: {row['source']}\n"
+                    f"Type: {row['type']}\n"
+                    f"Location: {row['location']}\n"
+                    f"Content:\n{row['content']}\n"
+                    f"Metadata: {json.dumps(row['metadata'])}"
+                )
+            )
+            for row in results
+        ]
 
     else:
         raise ValueError(f"Unknown tool: {name}")

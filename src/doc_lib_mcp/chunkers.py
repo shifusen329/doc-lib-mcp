@@ -4,9 +4,13 @@ from typing import List, Dict, Any
 
 def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
     """
-    Split markdown text into chunks by headings (##, #) or paragraphs.
+    Split markdown text into chunks by headings (##, #) or paragraphs,
+    and also extract code blocks as dedicated code chunks (redundantly).
     Each chunk includes content, type, source, location, and metadata.
     """
+    import re
+
+    # 1. Chunk as usual (headings/paragraphs), leaving code blocks in place
     heading_regex = re.compile(r'^(#{1,2})\s+(.*)', re.MULTILINE)
     matches = list(heading_regex.finditer(text))
     chunks = []
@@ -38,6 +42,33 @@ def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
             }
             chunks.append(chunk)
 
+    # 2. Extract all fenced code blocks as dedicated code chunks (only triple backticks)
+    # Only match code blocks with both opening and closing triple backticks
+    code_block_re = re.compile(
+        r"^(```+)\s*([^\n`]*)\n(.*?)(?=\n\1(\s|$))", re.DOTALL | re.MULTILINE
+    )
+    code_blocks = []
+    for match in code_block_re.finditer(text):
+        fence, lang, code, *_ = match.groups()
+        code_content = code.rstrip("\n")
+        # Add as code chunk if there is any content between triple backticks
+        if code_content:
+            meta = {"code_tag": True}
+            lang = lang.strip() if lang else None
+            if lang:
+                meta["language"] = lang
+            # If the language looks like a filename (e.g., "main.py", ".env"), add as filename
+            if lang and (lang.endswith(".py") or lang.startswith(".")):
+                meta["filename"] = lang
+            code_blocks.append({
+                "content": code_content,
+                "type": "code",
+                "source": source,
+                "location": f"code:{len(code_blocks)+1}",
+                "metadata": meta
+            })
+
+    chunks.extend(code_blocks)
     return chunks
 
 def chunk_python(code: str, source: str) -> List[Dict[str, Any]]:
@@ -186,24 +217,82 @@ def chunk_html(text: str, source: str) -> List[Dict[str, Any]]:
 
     chunks = []
 
+    # --- Extract code blocks from <div class="nextra-code"> wrappers (Nextra/modern docs) ---
+    nextra_code_blocks = []
+    for code_div in content_root.find_all("div", class_=lambda c: c and "nextra-code" in c):
+        pre = code_div.find("pre")
+        code = pre.get_text(separator="\n", strip=True) if pre else None
+        lang = None
+        filename = None
+        # Try to extract language from <code> or <pre> class
+        if pre and pre.has_attr("class"):
+            for cls in pre["class"]:
+                if cls.startswith("language-"):
+                    lang = cls.replace("language-", "")
+        # Look for filename in a child or sibling div
+        filename_div = code_div.find("div", class_=lambda c: c and ("filename" in c or "file" in c))
+        if filename_div:
+            filename = filename_div.get_text(strip=True)
+        if code:
+            nextra_code_blocks.append((code_div, code, lang, filename))
+        # Remove code block from soup so it's not included in narrative chunks
+        code_div.decompose()
+
+    for idx, (tag, code, lang, filename) in enumerate(nextra_code_blocks):
+        meta = {"code_tag": True, "framework": "nextra"}
+        if lang:
+            meta["language"] = lang
+        if filename:
+            meta["filename"] = filename
+        chunks.append({
+            "content": code,
+            "type": "code",
+            "source": source,
+            "location": f"nextra-code:{idx+1}",
+            "metadata": meta
+        })
+
     # --- Extract block code snippets (<pre>) as dedicated chunks ---
     # Find all <pre> tags. Inline <code> tags will remain part of the narrative chunks.
     pre_blocks = []
     for pre in content_root.find_all("pre"):
         code = pre.get_text(separator="\n", strip=True)
+        # Try to extract language from class (e.g., class="language-python")
+        lang = None
+        filename = None
+        if pre.has_attr("class"):
+            for cls in pre["class"]:
+                if cls.startswith("language-"):
+                    lang = cls.replace("language-", "")
+        # Look for a filename label in a preceding sibling or parent
+        label = None
+        parent = pre.parent
+        if parent and parent.name == "div" and parent.has_attr("class"):
+            for cls in parent["class"]:
+                if "filename" in cls or "file" in cls:
+                    label = parent.get_text(strip=True)
+        # Some doc frameworks use a <div> with a filename label just before the <pre>
+        prev = pre.find_previous_sibling()
+        if prev and prev.name == "div" and ("filename" in prev.get("class", []) or "file" in prev.get("class", [])):
+            filename = prev.get_text(strip=True)
         if code:
-            pre_blocks.append((pre, code))
-    # Removed the loop for standalone `code` tags
+            pre_blocks.append((pre, code, lang, filename or label))
+        # Remove code block from soup so it's not included in narrative chunks
+        pre.decompose()
 
-    for idx, (tag, code) in enumerate(pre_blocks): # Changed code_blocks to pre_blocks
+    for idx, (tag, code, lang, filename) in enumerate(pre_blocks):
+        meta = {"code_tag": True}
+        if lang:
+            meta["language"] = lang
+        if filename:
+            meta["filename"] = filename
         chunks.append({
             "content": code,
             "type": "code",
             "source": source,
             "location": f"code:{idx+1}",
-            "metadata": {"code_tag": True}
+            "metadata": meta
         })
-        # tag.decompose() # Removed: Keep code block in soup for narrative chunk context
 
     # --- Chunk the rest of the content as before ---
     headings = content_root.find_all(re.compile("^h[1-3]$"))
