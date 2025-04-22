@@ -5,22 +5,72 @@ from typing import List, Dict, Any
 def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
     """
     Split markdown text into chunks by headings (##, #) or paragraphs,
-    and also extract code blocks as dedicated code chunks (redundantly).
+    and also extract code blocks as dedicated code chunks (non-redundantly).
+    Handles nested code blocks robustly using mistune's AST parser.
     Each chunk includes content, type, source, location, and metadata.
     """
+    import mistune
     import re
 
-    # 1. Chunk as usual (headings/paragraphs), leaving code blocks in place
+    # Parse markdown into AST
+    markdown = mistune.create_markdown(renderer=mistune.AstRenderer())
+    ast = markdown(text)
+
+    code_blocks = []
+    code_spans = []
+    # Traverse AST to extract only top-level code blocks
+    def extract_code_blocks(ast_nodes, parent_heading=None, offset=0):
+        for node in ast_nodes:
+            if node["type"] == "block_code":
+                code_content = node["text"].strip()
+                if code_content and any(line.strip() for line in code_content.splitlines()):
+                    meta = {"code_tag": True}
+                    lang = node.get("info", None)
+                    if lang:
+                        meta["language"] = lang.strip()
+                        if lang.strip().endswith(".py") or lang.strip().startswith("."):
+                            meta["filename"] = lang.strip()
+                    if parent_heading:
+                        meta["parent_heading"] = parent_heading
+                    code_blocks.append({
+                        "content": code_content,
+                        "type": "code",
+                        "source": source,
+                        "location": f"code:{len(code_blocks)+1}",
+                        "metadata": meta
+                    })
+            elif node["type"] == "heading":
+                # Pass heading text to children
+                heading_text = node["children"][0]["text"].strip() if node.get("children") and node["children"][0]["type"] == "text" else ""
+                extract_code_blocks(node.get("children", []), parent_heading=heading_text)
+            elif "children" in node:
+                extract_code_blocks(node["children"], parent_heading=parent_heading)
+
+    extract_code_blocks(ast)
+
+    # Remove code blocks from text for narrative chunking
+    # Use mistune to render markdown without code blocks
+    class NoCodeRenderer(mistune.HTMLRenderer):
+        def block_code(self, code, info=None):
+            return ""
+    markdown_no_code = mistune.create_markdown(renderer=NoCodeRenderer())
+    narrative_html = markdown_no_code(text)
+    # Convert HTML back to plain text for heading/paragraph chunking
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(narrative_html, "lxml")
+    narrative_text = soup.get_text(separator="\n")
+
+    # Chunk narrative by headings or paragraphs
     heading_regex = re.compile(r'^(#{1,2})\s+(.*)', re.MULTILINE)
-    matches = list(heading_regex.finditer(text))
+    matches = list(heading_regex.finditer(narrative_text))
     chunks = []
 
     if matches:
         for i, match in enumerate(matches):
             start = match.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(narrative_text)
             heading = match.group(2).strip()
-            content = text[start:end].strip()
+            content = narrative_text[start:end].strip()
             if content:
                 chunk = {
                     "content": content,
@@ -31,7 +81,7 @@ def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
                 }
                 chunks.append(chunk)
     else:
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        paragraphs = [p.strip() for p in narrative_text.split('\n\n') if p.strip()]
         for idx, para in enumerate(paragraphs):
             chunk = {
                 "content": para,
@@ -41,32 +91,6 @@ def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
                 "metadata": {}
             }
             chunks.append(chunk)
-
-    # 2. Extract all fenced code blocks as dedicated code chunks (only triple backticks)
-    # Only match code blocks with both opening and closing triple backticks
-    code_block_re = re.compile(
-        r"^(```+)\s*([^\n`]*)\n(.*?)(?=\n\1(\s|$))", re.DOTALL | re.MULTILINE
-    )
-    code_blocks = []
-    for match in code_block_re.finditer(text):
-        fence, lang, code, *_ = match.groups()
-        code_content = code.rstrip("\n")
-        # Add as code chunk if there is any content between triple backticks
-        if code_content:
-            meta = {"code_tag": True}
-            lang = lang.strip() if lang else None
-            if lang:
-                meta["language"] = lang
-            # If the language looks like a filename (e.g., "main.py", ".env"), add as filename
-            if lang and (lang.endswith(".py") or lang.startswith(".")):
-                meta["filename"] = lang
-            code_blocks.append({
-                "content": code_content,
-                "type": "code",
-                "source": source,
-                "location": f"code:{len(code_blocks)+1}",
-                "metadata": meta
-            })
 
     chunks.extend(code_blocks)
     return chunks

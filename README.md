@@ -23,6 +23,8 @@ The server implements a wide range of tools:
 
 - **add-note**: Add a new note to the in-memory note store
   - Arguments: `name` (string), `content` (string)
+- **ingest-string**: Ingest and chunk a markdown or plain text string provided via message
+  - Arguments: `content` (string, required), `source` (string, optional), `tags` (list of strings, optional)
 - **ingest-markdown**: Ingest and chunk a markdown (.md) file
   - Arguments: `path` (string)
 - **ingest-python**: Ingest and chunk a Python (.py) file
@@ -42,6 +44,11 @@ The server implements a wide range of tools:
   - Returns the most relevant chunks for a given query, optionally filtered by type and/or tag.
 - **delete-source**: Delete all chunks from a given source
   - Arguments: `source` (string)
+- **delete-chunk-by-id**: Delete one or more chunks by id
+  - Arguments: `id` (integer, optional), `ids` (list of integers, optional)
+  - You can delete a single chunk by specifying `id`, or delete multiple chunks at once by specifying `ids`.
+- **update-chunk-type**: Update the type attribute for a chunk by id
+  - Arguments: `id` (integer, required), `type` (string, required)
 - **ingest-batch**: Ingest and chunk multiple documentation files (markdown, OpenAPI JSON, Python) in batch
   - Arguments: `paths` (list of strings)
 - **list-sources**: List all unique sources (file paths) that have been ingested and stored in memory

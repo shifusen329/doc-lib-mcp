@@ -170,21 +170,26 @@ async def handle_list_tools() -> list[types.Tool]:
     """
     return [
         types.Tool(
-            name="add-note",
-            description="Add a new note to the in-memory note store. Arguments: name (note name), content (note content).",
+            name="ingest-string",
+            description="Ingest and chunk a markdown or plain text string provided via message. Arguments: content (string, required), source (string, optional for provenance), tags (array of strings, optional for classification).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The name of the note to add."
-                    },
                     "content": {
                         "type": "string",
-                        "description": "The content of the note."
+                        "description": "The text content to ingest (markdown or plain text)."
                     },
+                    "source": {
+                        "type": "string",
+                        "description": "Optional source identifier for provenance (e.g., message id, user, etc.)."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags for classification."
+                    }
                 },
-                "required": ["name", "content"],
+                "required": ["content"],
             },
         ),
         types.Tool(
@@ -346,6 +351,24 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="update-chunk-type",
+            description="Update the type attribute for a chunk by id. Arguments: id (integer, required), type (string, required).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The id of the chunk to update."
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "The new type value to set (e.g., 'code', 'markdown', 'html')."
+                    }
+                },
+                "required": ["id", "type"],
+            },
+        ),
+        types.Tool(
             name="tag-chunks-by-source",
             description="Adds specified tags to the metadata of all chunks associated with a given source (URL or file path). Merges with existing tags.",
             inputSchema={
@@ -374,8 +397,30 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="delete-chunk-by-id",
+            description="Delete one or more chunks by id. Arguments: id (integer, optional), ids (array of integers, optional).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The id of the chunk to delete (for single delete)."
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "A list of chunk ids to delete (for batch delete)."
+                    }
+                },
+                "anyOf": [
+                    {"required": ["id"]},
+                    {"required": ["ids"]}
+                ]
+            },
+        ),
+        types.Tool(
             name="get-chunks-by-type-and-source",
-            description="Retrieve all chunks of a specified type for a provided source id. Arguments: source (string), type (string).",
+            description="Retrieve all chunks for a provided source id, optionally filtered by type. Arguments: source (string, required), type (string, optional).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -385,10 +430,10 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "type": {
                         "type": "string",
-                        "description": "The chunk type to filter by (e.g., 'code', 'markdown', 'html')."
+                        "description": "The chunk type to filter by (e.g., 'code', 'markdown', 'html'). Optional."
                     }
                 },
-                "required": ["source", "type"],
+                "required": ["source"],
             },
         ),
     ]
@@ -851,19 +896,28 @@ async def handle_call_tool(
     elif name == "get-chunks-by-type-and-source":
         source = arguments.get("source")
         chunk_type = arguments.get("type")
-        if not source or not chunk_type:
-            return [types.TextContent(type="text", text="Missing source or type argument.")]
+        if not source:
+            return [types.TextContent(type="text", text="Missing source argument.")]
         conn = get_db_conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT id, source, type, location, content, metadata FROM chunks WHERE source = %s AND type = %s",
-            (source, chunk_type)
-        )
+        if chunk_type:
+            cur.execute(
+                "SELECT id, source, type, location, content, metadata FROM chunks WHERE source = %s AND type = %s",
+                (source, chunk_type)
+            )
+        else:
+            cur.execute(
+                "SELECT id, source, type, location, content, metadata FROM chunks WHERE source = %s",
+                (source,)
+            )
         results = cur.fetchall()
         cur.close()
         conn.close()
         if not results:
-            return [types.TextContent(type="text", text=f"No chunks found for source '{source}' with type '{chunk_type}'.")]
+            if chunk_type:
+                return [types.TextContent(type="text", text=f"No chunks found for source '{source}' with type '{chunk_type}'.")]
+            else:
+                return [types.TextContent(type="text", text=f"No chunks found for source '{source}'.")]
         return [
             types.TextContent(
                 type="text",
@@ -877,6 +931,74 @@ async def handle_call_tool(
                 )
             )
             for row in results
+        ]
+
+    elif name == "delete-chunk-by-id":
+        chunk_id = arguments.get("id")
+        chunk_ids = arguments.get("ids")
+        if chunk_id is None and not chunk_ids:
+            return [types.TextContent(type="text", text="Missing id or ids argument.")]
+        conn = get_db_conn()
+        cur = conn.cursor()
+        if chunk_ids:
+            # Batch delete
+            cur.execute(
+                f"DELETE FROM chunks WHERE id = ANY(%s)",
+                (chunk_ids,)
+            )
+            deleted = cur.rowcount
+            msg = f"Deleted {deleted} chunk(s) with ids: {chunk_ids}"
+        else:
+            cur.execute("DELETE FROM chunks WHERE id = %s", (chunk_id,))
+            deleted = cur.rowcount
+            msg = f"Deleted {deleted} chunk(s) with id: {chunk_id}"
+        conn.commit()
+        cur.close()
+        conn.close()
+        return [types.TextContent(type="text", text=msg)]
+
+    elif name == "ingest-string":
+        content = arguments.get("content")
+        source = arguments.get("source") or f"string-ingest-{hash(content)}"
+        tags = arguments.get("tags", [])
+        if not content:
+            return [types.TextContent(type="text", text="Missing content argument.")]
+        # Use markdown chunker for rich content, fallback to paragraph split for plain text
+        if "```" in content or "#" in content or "-" in content or "\n\n" in content:
+            chunks = chunk_markdown(content, source=source)
+        else:
+            # Fallback: split by double newlines
+            paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+            chunks = [{
+                "content": para,
+                "type": "markdown",
+                "source": source,
+                "location": f"paragraph:{i+1}",
+                "metadata": {}
+            } for i, para in enumerate(paragraphs)]
+        # Add tags to all chunk metadata
+        for chunk in chunks:
+            chunk["metadata"] = chunk.get("metadata", {})
+            if tags:
+                existing_tags = set(chunk["metadata"].get("tags", []))
+                chunk["metadata"]["tags"] = list(existing_tags.union(tags))
+        embeddings = await embed_texts([chunk["content"] for chunk in chunks])
+        # Store chunks in the database
+        conn = get_db_conn()
+        cur = conn.cursor()
+        for chunk, emb in zip(chunks, embeddings):
+            cur.execute(
+                "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
+                (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return [
+            types.TextContent(
+                type="text",
+                text=f"Ingested {len(chunks)} chunk(s) from string (source: {source})"
+            )
         ]
 
     else:

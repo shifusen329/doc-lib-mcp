@@ -13,7 +13,8 @@ dependencies = [
     "httpx",
     "psycopg2-binary",
     "playwright",
-    "readability-lxml"
+    "readability-lxml",
+    "mistune>=3.0.0"
 ]
 [[project.authors]]
 name = "shifusen329"
