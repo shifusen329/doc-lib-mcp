@@ -194,7 +194,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="ingest-markdown",
-            description="Ingest and chunk a markdown (.md) file. Splits the file into chunks by headings or paragraphs and stores them in memory. Argument: path (file path to markdown file).",
+            description="Ingest and chunk a markdown (.md) file. Splits the file into chunks by headings or paragraphs and stores them in memory. Arguments: path (file path to markdown file), tags (array of strings, optional).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -202,13 +202,18 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "File path to the markdown (.md) file to ingest."
                     },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags for classification."
+                    }
                 },
                 "required": ["path"],
             },
         ),
         types.Tool(
             name="ingest-python",
-            description="Ingest and chunk a Python (.py) file. Splits the file into function/class chunks and stores them in memory. Argument: path (file path to Python file).",
+            description="Ingest and chunk a Python (.py) file. Splits the file into function/class chunks and stores them in memory. Arguments: path (file path to Python file), tags (array of strings, optional).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -216,13 +221,18 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "File path to the Python (.py) file to ingest."
                     },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags for classification."
+                    }
                 },
                 "required": ["path"],
             },
         ),
         types.Tool(
             name="ingest-openapi",
-            description="Ingest and chunk an OpenAPI JSON file. Splits the file into endpoint and schema chunks and stores them in memory. Argument: path (file path to OpenAPI JSON file).",
+            description="Ingest and chunk an OpenAPI JSON file. Splits the file into endpoint and schema chunks and stores them in memory. Arguments: path (file path to OpenAPI JSON file), tags (array of strings, optional).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -230,13 +240,18 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "File path to the OpenAPI JSON file to ingest."
                     },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags for classification."
+                    }
                 },
                 "required": ["path"],
             },
         ),
         types.Tool(
             name="ingest-html",
-            description="Ingest and chunk an HTML file. Splits the file into chunks by headings or paragraphs and stores them in memory. Argument: path (file path to HTML file).",
+            description="Ingest and chunk an HTML file. Splits the file into chunks by headings or paragraphs and stores them in memory. Arguments: path (file path to HTML file), tags (array of strings, optional).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -244,6 +259,11 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "File path to the HTML file to ingest."
                     },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags for classification."
+                    }
                 },
                 "required": ["path"],
             },
@@ -473,6 +493,7 @@ async def handle_call_tool(
 
     elif name == "ingest-markdown":
         path = arguments.get("path")
+        tags = arguments.get("tags", [])
         if not path or not os.path.isfile(path):
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
@@ -483,9 +504,17 @@ async def handle_call_tool(
                 for chunk in chunk_markdown(superchunk, source=path):
                     chunk["metadata"] = chunk.get("metadata", {})
                     chunk["metadata"]["superchunk_index"] = superchunk_index
+                    if tags:
+                        existing_tags = set(chunk["metadata"].get("tags", []))
+                        chunk["metadata"]["tags"] = list(existing_tags.union(tags))
                     all_chunks.append(chunk)
         else:
             all_chunks = chunk_markdown(text, source=path)
+            for chunk in all_chunks:
+                chunk["metadata"] = chunk.get("metadata", {})
+                if tags:
+                    existing_tags = set(chunk["metadata"].get("tags", []))
+                    chunk["metadata"]["tags"] = list(existing_tags.union(tags))
         embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
@@ -507,6 +536,7 @@ async def handle_call_tool(
 
     elif name == "ingest-python":
         path = arguments.get("path")
+        tags = arguments.get("tags", [])
         if not path or not os.path.isfile(path):
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
@@ -517,9 +547,17 @@ async def handle_call_tool(
                 for chunk in chunk_python(superchunk, source=path):
                     chunk["metadata"] = chunk.get("metadata", {})
                     chunk["metadata"]["superchunk_index"] = superchunk_index
+                    if tags:
+                        existing_tags = set(chunk["metadata"].get("tags", []))
+                        chunk["metadata"]["tags"] = list(existing_tags.union(tags))
                     all_chunks.append(chunk)
         else:
             all_chunks = chunk_python(code, source=path)
+            for chunk in all_chunks:
+                chunk["metadata"] = chunk.get("metadata", {})
+                if tags:
+                    existing_tags = set(chunk["metadata"].get("tags", []))
+                    chunk["metadata"]["tags"] = list(existing_tags.union(tags))
         embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
@@ -541,6 +579,7 @@ async def handle_call_tool(
 
     elif name == "ingest-openapi":
         path = arguments.get("path")
+        tags = arguments.get("tags", [])
         if not path or not os.path.isfile(path):
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
@@ -555,11 +594,19 @@ async def handle_call_tool(
                 for chunk in chunk_openapi(openapi_json, source=path):
                     chunk["metadata"] = chunk.get("metadata", {})
                     chunk["metadata"]["superchunk_index"] = superchunk_index
+                    if tags:
+                        existing_tags = set(chunk["metadata"].get("tags", []))
+                        chunk["metadata"]["tags"] = list(existing_tags.union(tags))
                     all_chunks.append(chunk)
         else:
             with open(path, "r", encoding="utf-8") as f:
                 openapi_json = json.load(f)
             all_chunks = chunk_openapi(openapi_json, source=path)
+            for chunk in all_chunks:
+                chunk["metadata"] = chunk.get("metadata", {})
+                if tags:
+                    existing_tags = set(chunk["metadata"].get("tags", []))
+                    chunk["metadata"]["tags"] = list(existing_tags.union(tags))
         embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
@@ -581,6 +628,7 @@ async def handle_call_tool(
 
     elif name == "ingest-html":
         path = arguments.get("path")
+        tags = arguments.get("tags", [])
         if not path or not os.path.isfile(path):
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         with open(path, "r", encoding="utf-8") as f:
@@ -591,9 +639,17 @@ async def handle_call_tool(
                 for chunk in chunk_html(superchunk, source=path):
                     chunk["metadata"] = chunk.get("metadata", {})
                     chunk["metadata"]["superchunk_index"] = superchunk_index
+                    if tags:
+                        existing_tags = set(chunk["metadata"].get("tags", []))
+                        chunk["metadata"]["tags"] = list(existing_tags.union(tags))
                     all_chunks.append(chunk)
         else:
             all_chunks = chunk_html(html, source=path)
+            for chunk in all_chunks:
+                chunk["metadata"] = chunk.get("metadata", {})
+                if tags:
+                    existing_tags = set(chunk["metadata"].get("tags", []))
+                    chunk["metadata"]["tags"] = list(existing_tags.union(tags))
         embeddings = await embed_texts([chunk["content"] for chunk in all_chunks])
         # Store chunks in the database
         conn = get_db_conn()
