@@ -14,7 +14,8 @@ dependencies = [
     "psycopg2-binary",
     "playwright",
     "readability-lxml",
-    "mistune>=3.0.0"
+    "mistune>=3.0.0",
+    "openai"
 ]
 [[project.authors]]
 name = "shifusen329"

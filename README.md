@@ -35,6 +35,11 @@ The server implements a wide range of tools:
   - Arguments: `path` (string)
 - **ingest-html-url**: Ingest and chunk HTML content from a URL (optionally using Playwright for dynamic content)
   - Arguments: `url` (string), `dynamic` (boolean, optional)
+- **smart_ingestion**: Extracts all technically relevant content from a file using Gemini, then chunks it using robust markdown logic.
+  - Arguments: `path` (string, required), `prompt` (string, optional)
+  - Uses Gemini 2.0 Flash 001 to extract only code, configuration, markdown structure, and technical definitions (no summaries or commentary).
+  - Passes the extracted content to a mistune 3.x-based chunker that preserves both code blocks and markdown/narrative content as separate chunks.
+  - Each chunk is embedded and stored for semantic search and retrieval.
 - **search-chunks**: Semantic search over ingested content
   - Arguments: 
     - `query` (string): The semantic search query.
@@ -61,8 +66,9 @@ The server implements a wide range of tools:
 #### Chunking and Code Extraction
 
 - Markdown, Python, OpenAPI, and HTML files are split into logical chunks for efficient retrieval and search.
-- The HTML chunker uses the `readability-lxml` library to extract main content first.
-- It then extracts block code snippets from `<pre>` tags as dedicated "code" chunks. Inline `<code>` content remains part of the narrative chunks.
+- The markdown chunker uses mistune 3.x's AST API and regex to robustly split content by code blocks and narrative, preserving all original formatting.
+- Both code blocks and markdown/narrative content are preserved as separate chunks.
+- The HTML chunker uses the `readability-lxml` library to extract main content first, then extracts block code snippets from `<pre>` tags as dedicated "code" chunks. Inline `<code>` content remains part of the narrative chunks.
 
 #### Semantic Search
 

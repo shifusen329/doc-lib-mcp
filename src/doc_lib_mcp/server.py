@@ -456,6 +456,24 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["source"],
             },
         ),
+        types.Tool(
+            name="smart_ingestion",
+            description="Send a file of any type to Gemini 2.0 Flash 001 with a prompt to generate structured documentation content for an AI coding assistant, and embed the response using the Ollama model.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path to ingest."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Custom prompt to use for Gemini (optional)."
+                    }
+                },
+                "required": ["path"],
+            },
+        ),
     ]
 
 SUPERCHUNK_SIZE = 500_000  # 500KB in characters
@@ -1056,6 +1074,191 @@ async def handle_call_tool(
                 text=f"Ingested {len(chunks)} chunk(s) from string (source: {source})"
             )
         ]
+
+    elif name == "smart_ingestion":
+        import mimetypes
+        import base64
+        from openai import AsyncOpenAI
+
+        path = arguments.get("path")
+        prompt = arguments.get("prompt")
+        if not path or not os.path.isfile(path):
+            return [types.TextContent(type="text", text=f"File not found: {path}")]
+        file_name = os.path.basename(path)
+        mime_type, _ = mimetypes.guess_type(path)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        if not GEMINI_API_KEY:
+            return [types.TextContent(type="text", text="GEMINI_API_KEY not set in environment.")]
+
+        # Step 1: If text/markdown, read content and send as text; else, upload file
+        is_text = (
+            mime_type.startswith("text/")
+            or file_name.lower().endswith((".md", ".txt", ".rst", ".csv", ".py", ".json"))
+        )
+        if is_text:
+            with open(path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+            file_metadata = {
+                "original_file": file_name,
+                "mime_type": mime_type,
+            }
+            # Step 2: Construct prompt
+            default_prompt = (
+                "You are an AI assistant. Extract all content from the document that would help another AI assistant understand and reason about the subject matter. "
+                "Include any code blocks, configuration examples, markdown structure, headers, and technical definitions. "
+                "Do not include commentary, summaries, or explanations. Do not add any formatting beyond what is already present in the original document. "
+                "Do not wrap the output in a ```json or any other fenced code block at the top level—just output the raw content. "
+                "Prioritize:\n"
+                "- Model/configuration definitions\n"
+                "- Code blocks and function calls\n"
+                "- Tokenization and preprocessing steps\n"
+                "- CLI commands or environment setup\n"
+                "- Training, fine-tuning, or inference pipelines\n"
+                "- Hyperparameters and checkpointing information\n"
+                "- Data transformation logic\n"
+                "- Architectural diagrams or markdown lists of components\n"
+                "Return only what is technically relevant, preserving all code, markdown structure, and formatting. "
+                "Strip any editorial content unless it is part of an instructional section."
+            )
+            user_prompt = prompt if prompt else default_prompt
+
+            # Step 3: Call Gemini 2.0 Flash 001 via OpenAI-compatible API
+            try:
+                client = AsyncOpenAI(
+                    api_key=GEMINI_API_KEY,
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+                )
+                messages = [
+                    {"role": "system", "content": "You are a helpful AI coding assistant."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"{user_prompt}\n\n---\n\n{file_content}"}
+                        ]
+                    }
+                ]
+                response = await client.chat.completions.create(
+                    model="gemini-2.0-flash",
+                    messages=messages,
+                    n=1,
+                    max_tokens=2048,
+                )
+                gemini_content = response.choices[0].message.content
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"Failed to get Gemini response: {e}")]
+
+            import json as _json
+            import re
+            # Robustly strip only the initial ```json and final ``` if present (line-based)
+            lines = gemini_content.splitlines()
+            if lines and re.match(r"^```json\s*$", lines[0], re.IGNORECASE):
+                lines = lines[1:]
+            if lines and re.match(r"^```\s*$", lines[-1]):
+                lines = lines[:-1]
+            cleaned_content = "\n".join(lines).strip()
+            # Pass the extracted content to the markdown chunker before embedding
+            from .chunkers import chunk_markdown
+            chunks = chunk_markdown(gemini_content, source=path)
+            if not chunks:
+                return [types.TextContent(type="text", text="No content found to ingest from Gemini extraction.")]
+            embeddings = await embed_texts([chunk["content"] for chunk in chunks])
+            conn = get_db_conn()
+            cur = conn.cursor()
+            for chunk, emb in zip(chunks, embeddings):
+                cur.execute(
+                    "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (chunk["source"], chunk["type"], chunk["location"], chunk["content"], emb, json.dumps(chunk.get("metadata", {})))
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Smart-ingested {file_name} with Gemini, created {len(chunks)} technical content chunk(s) using the markdown chunker."
+                )
+            ]
+        else:
+            # Non-text: upload file to Gemini
+            upload_url = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+            headers = {
+                "Authorization": f"Bearer {GEMINI_API_KEY}",
+            }
+            files = {
+                "file": (file_name, open(path, "rb"), mime_type)
+            }
+            async with httpx.AsyncClient() as client:
+                try:
+                    resp = await client.post(upload_url, headers=headers, files=files, timeout=60)
+                    resp.raise_for_status()
+                    upload_data = resp.json()
+                    gemini_file = upload_data.get("file", {})
+                    gemini_file_name = gemini_file.get("name")
+                    gemini_file_uri = gemini_file.get("uri")
+                except Exception as e:
+                    return [types.TextContent(type="text", text=f"Failed to upload file to Gemini: {e}")]
+
+            default_prompt = (
+                "Provide a structured summary of this file with documentation content relevant to providing context to an AI coding assistant. "
+                "Focus on code structure, API usage, and any information that would help an LLM-based assistant answer developer questions about this file. "
+                "Respond in markdown with a JSON block if possible."
+            )
+            user_prompt = prompt if prompt else default_prompt
+
+            try:
+                client = AsyncOpenAI(
+                    api_key=GEMINI_API_KEY,
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+                )
+                messages = [
+                    {"role": "system", "content": "You are a helpful AI coding assistant."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_prompt},
+                            {"type": "file", "file": {"file_id": gemini_file_name}}
+                        ]
+                    }
+                ]
+                response = await client.chat.completions.create(
+                    model="gemini-2.0-flash",
+                    messages=messages,
+                    n=1,
+                    max_tokens=2048,
+                )
+                gemini_content = response.choices[0].message.content
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"Failed to get Gemini response: {e}")]
+
+            try:
+                embeddings = await embed_texts([gemini_content])
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"Failed to embed Gemini response: {e}")]
+
+            conn = get_db_conn()
+            cur = conn.cursor()
+            metadata = {
+                "gemini_file_name": gemini_file_name,
+                "gemini_file_uri": gemini_file_uri,
+                "original_file": file_name,
+                "mime_type": mime_type,
+            }
+            cur.execute(
+                "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
+                (path, "smart_ingestion", "gemini", gemini_content, embeddings[0], json.dumps(metadata))
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Smart-ingested {file_name} with Gemini, embedded and stored as a smart_ingestion chunk."
+                )
+            ]
 
     else:
         raise ValueError(f"Unknown tool: {name}")

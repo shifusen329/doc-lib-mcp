@@ -12,8 +12,8 @@ def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
     import mistune
     import re
 
-    # Parse markdown into AST
-    markdown = mistune.create_markdown(renderer=mistune.AstRenderer())
+    # Parse markdown into AST (mistune 3.x)
+    markdown = mistune.create_markdown(renderer='ast')
     ast = markdown(text)
 
     code_blocks = []
@@ -21,7 +21,7 @@ def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
     # Traverse AST to extract only top-level code blocks
     def extract_code_blocks(ast_nodes, parent_heading=None, offset=0):
         for node in ast_nodes:
-            if node["type"] == "block_code":
+            if node["type"] == "block_code" and "text" in node:
                 code_content = node["text"].strip()
                 if code_content and any(line.strip() for line in code_content.splitlines()):
                     meta = {"code_tag": True}
@@ -48,51 +48,69 @@ def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
 
     extract_code_blocks(ast)
 
-    # Remove code blocks from text for narrative chunking
-    # Use mistune to render markdown without code blocks
-    class NoCodeRenderer(mistune.HTMLRenderer):
-        def block_code(self, code, info=None):
-            return ""
-    markdown_no_code = mistune.create_markdown(renderer=NoCodeRenderer())
-    narrative_html = markdown_no_code(text)
-    # Convert HTML back to plain text for heading/paragraph chunking
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(narrative_html, "lxml")
-    narrative_text = soup.get_text(separator="\n")
-
-    # Chunk narrative by headings or paragraphs
-    heading_regex = re.compile(r'^(#{1,2})\s+(.*)', re.MULTILINE)
-    matches = list(heading_regex.finditer(narrative_text))
+    # New: Chunk by code blocks and headings, preserving markdown formatting
     chunks = []
+    code_block_pattern = re.compile(r"(```[\s\S]+?```)", re.MULTILINE)
+    last_end = 0
+    code_block_idx = 1
 
-    if matches:
-        for i, match in enumerate(matches):
-            start = match.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(narrative_text)
-            heading = match.group(2).strip()
-            content = narrative_text[start:end].strip()
-            if content:
-                chunk = {
-                    "content": content,
+    for match in code_block_pattern.finditer(text):
+        start, end = match.span()
+        # Narrative chunk before the code block
+        if start > last_end:
+            narrative = text[last_end:start].strip()
+            if narrative:
+                # Always preserve narrative as a markdown chunk, even if short or not separated by headings
+                chunks.append({
+                    "content": narrative,
                     "type": "markdown",
                     "source": source,
-                    "location": f"heading:{heading}",
-                    "metadata": {"heading": heading}
-                }
-                chunks.append(chunk)
-    else:
-        paragraphs = [p.strip() for p in narrative_text.split('\n\n') if p.strip()]
-        for idx, para in enumerate(paragraphs):
-            chunk = {
-                "content": para,
-                "type": "markdown",
+                    "location": f"narrative:{last_end}-{start}",
+                    "metadata": {}
+                })
+        # Code block chunk
+        code_block = match.group(1).strip()
+        if code_block:
+            chunks.append({
+                "content": code_block,
+                "type": "code",
                 "source": source,
-                "location": f"paragraph:{idx+1}",
-                "metadata": {}
-            }
-            chunks.append(chunk)
+                "location": f"code:{code_block_idx}",
+                "metadata": {"code_tag": True}
+            })
+            code_block_idx += 1
+        last_end = end
 
-    chunks.extend(code_blocks)
+    # Any remaining narrative after the last code block
+    if last_end < len(text):
+        narrative = text[last_end:].strip()
+        if narrative:
+            heading_regex = re.compile(r'^(#{1,6} .+)$', re.MULTILINE)
+            heading_matches = list(heading_regex.finditer(narrative))
+            if heading_matches:
+                for i, hmatch in enumerate(heading_matches):
+                    hstart = hmatch.start()
+                    hend = heading_matches[i + 1].start() if i + 1 < len(heading_matches) else len(narrative)
+                    heading_chunk = narrative[hstart:hend].strip()
+                    if heading_chunk:
+                        chunks.append({
+                            "content": heading_chunk,
+                            "type": "markdown",
+                            "source": source,
+                            "location": f"heading:{hmatch.group(1).strip()}",
+                            "metadata": {"heading": hmatch.group(1).strip()}
+                        })
+            else:
+                paragraphs = [p.strip() for p in narrative.split('\n\n') if p.strip()]
+                for idx, para in enumerate(paragraphs):
+                    chunks.append({
+                        "content": para,
+                        "type": "markdown",
+                        "source": source,
+                        "location": f"paragraph:{idx+1}",
+                        "metadata": {}
+                    })
+
     return chunks
 
 def chunk_python(code: str, source: str) -> List[Dict[str, Any]]:
