@@ -1343,6 +1343,12 @@ async def handle_call_tool(
                 "original_file": file_name,
                 "mime_type": mime_type,
             }
+            # Add tags to the metadata
+            if tags:
+                existing_tags = set(metadata.get("tags", []))
+                new_tags = set(tags)
+                metadata["tags"] = list(existing_tags.union(new_tags))
+
             cur.execute(
                 "INSERT INTO chunks (source, type, location, content, embedding, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
                 (path, "smart_ingestion", "gemini", gemini_content, embeddings[0], json.dumps(metadata))

@@ -36,7 +36,10 @@ The server implements a wide range of tools:
 - **ingest-html-url**: Ingest and chunk HTML content from a URL (optionally using Playwright for dynamic content)
   - Arguments: `url` (string), `dynamic` (boolean, optional)
 - **smart_ingestion**: Extracts all technically relevant content from a file using Gemini, then chunks it using robust markdown logic.
-  - Arguments: `path` (string, required), `prompt` (string, optional)
+  - Arguments:
+    - `path` (string, required): File path to ingest.
+    - `prompt` (string, optional): Custom prompt to use for Gemini.
+    - `tags` (list of strings, optional): Optional list of tags for classification.
   - Uses Gemini 2.0 Flash 001 to extract only code, configuration, markdown structure, and technical definitions (no summaries or commentary).
   - Passes the extracted content to a mistune 3.x-based chunker that preserves both code blocks and markdown/narrative content as separate chunks.
   - Each chunk is embedded and stored for semantic search and retrieval.
