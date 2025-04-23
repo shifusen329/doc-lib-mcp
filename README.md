@@ -64,6 +64,12 @@ The server implements a wide range of tools:
     - `tag` (string, optional): Filter sources by tag in chunk metadata.
     - `query` (string, optional): Semantic search query to find relevant sources.
     - `top_k` (integer, optional, default 10): Number of top sources to return when using query.
+- **get-context**: Retrieve relevant content chunks (content only) for use as AI context, with filtering by tag, type, and semantic similarity.
+  - Arguments:
+    - `query` (string, optional): The semantic search query.
+    - `tag` (string, optional): Filter results by a specific tag in chunk metadata.
+    - `type` (string, optional): Filter results by chunk type (e.g., 'code', 'markdown').
+    - `top_k` (integer, optional, default 5): The number of top relevant chunks to retrieve.
 - **update-chunk-metadata**: Update the metadata field for a chunk by id
   - Arguments: `id` (integer), `metadata` (object)
 - **tag-chunks-by-source**: Adds specified tags to the metadata of all chunks associated with a given source (URL or file path). Merges with existing tags.

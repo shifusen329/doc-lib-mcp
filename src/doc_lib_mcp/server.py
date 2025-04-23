@@ -979,6 +979,60 @@ async def handle_call_tool(
             for source in sources
         ]
 
+    elif name == "get-context":
+        query = arguments.get("query")
+        tag = arguments.get("tag")
+        filter_type = arguments.get("type")
+        top_k = arguments.get("top_k", 5) # Default top_k for context
+
+        conn = get_db_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        chunks_content = []
+
+        sql_query = "SELECT content, embedding <=> %s AS distance FROM chunks"
+        params = []
+        where_clauses = []
+
+        if query:
+            query_emb = (await embed_texts([query]))[0]
+            embedding_str = "[" + ",".join(str(x) for x in query_emb) + "]"
+            params.append(embedding_str)
+            # Order by distance if query is provided
+            order_by = " ORDER BY distance"
+        else:
+            # No query, no specific order needed for context
+            order_by = ""
+
+        if tag:
+            where_clauses.append("metadata->'tags' @> %s")
+            params.append(json.dumps([tag]))
+        if filter_type:
+            where_clauses.append("type = %s")
+            params.append(filter_type)
+
+        if where_clauses:
+            sql_query += " WHERE " + " AND ".join(where_clauses)
+
+        sql_query += order_by + " LIMIT %s"
+        params.append(top_k)
+
+        try:
+            cur.execute(sql_query, tuple(params))
+            results = cur.fetchall()
+            chunks_content = [row['content'] for row in results]
+        except Exception as e:
+             return [types.TextContent(type="text", text=f"Context retrieval failed: {e}")]
+        finally:
+            cur.close()
+            conn.close()
+
+        if not chunks_content:
+            return [types.TextContent(type="text", text="No relevant context found.")]
+
+        # Return content as a list of strings
+        return [types.TextContent(type="text", text=content) for content in chunks_content]
+
+
     elif name == "update-chunk-metadata":
         chunk_id = arguments.get("id")
         metadata = arguments.get("metadata")
