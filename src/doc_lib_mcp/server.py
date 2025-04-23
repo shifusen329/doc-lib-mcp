@@ -483,6 +483,11 @@ async def handle_list_tools() -> list[types.Tool]:
                     "prompt": {
                         "type": "string",
                         "description": "Custom prompt to use for Gemini (optional)."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags for classification."
                     }
                 },
                 "required": ["path"],
@@ -1205,6 +1210,7 @@ async def handle_call_tool(
 
         path = arguments.get("path")
         prompt = arguments.get("prompt")
+        tags = arguments.get("tags", []) # Get optional tags argument
         if not path or not os.path.isfile(path):
             return [types.TextContent(type="text", text=f"File not found: {path}")]
         file_name = os.path.basename(path)
@@ -1315,6 +1321,14 @@ async def handle_call_tool(
             chunks = chunk_markdown(cleaned_content, source=path)
             if not chunks:
                 return [types.TextContent(type="text", text="No content found to ingest from Gemini extraction.")]
+
+            # Add tags to all chunk metadata
+            for chunk in chunks:
+                chunk["metadata"] = chunk.get("metadata", {})
+                if tags:
+                    existing_tags = set(chunk["metadata"].get("tags", []))
+                    chunk["metadata"]["tags"] = list(existing_tags.union(tags))
+
             embeddings = await embed_texts([chunk["content"] for chunk in chunks])
             conn = get_db_conn()
             cur = conn.cursor()
