@@ -1186,16 +1186,6 @@ async def handle_call_tool(
                 if first_newline != -1:
                     cleaned_content = cleaned_content[first_newline + 1:].strip()
 
-            if cleaned_content.endswith("```"):
-                 # Find the last newline before the closing fence
-                 last_newline = cleaned_content.rfind('\n```')
-                 if last_newline != -1:
-                     cleaned_content = cleaned_content[:last_newline].strip()
-                 else:
-                     # Handle cases with no newlines before the end fence
-                     cleaned_content = cleaned_content[:-3].strip()
-
-
             # Pass the extracted content to the markdown chunker
             chunks = chunk_markdown(cleaned_content, source=path)
             if not chunks:
@@ -1295,6 +1285,29 @@ async def handle_call_tool(
                     text=f"Smart-ingested {file_name} with Gemini, embedded and stored as a smart_ingestion chunk."
                 )
             ]
+
+    elif name == "update-chunk-type":
+        chunk_id = arguments.get("id")
+        chunk_type = arguments.get("type")
+        if chunk_id is None or chunk_type is None:
+            return [types.TextContent(type="text", text="Missing id or type argument.")]
+        conn = get_db_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE chunks SET type = %s WHERE id = %s",
+                (chunk_type, chunk_id)
+            )
+            updated = cur.rowcount
+            conn.commit()
+            msg = f"Updated type for chunk id {chunk_id}. Rows affected: {updated}"
+        except Exception as e:
+            conn.rollback()
+            msg = f"Failed to update type for chunk id {chunk_id}: {e}"
+        finally:
+            cur.close()
+            conn.close()
+        return [types.TextContent(type="text", text=msg)]
 
     else:
         raise ValueError(f"Unknown tool: {name}")
