@@ -56,7 +56,11 @@ The server implements a wide range of tools:
   - Arguments: `id` (integer, required), `type` (string, required)
 - **ingest-batch**: Ingest and chunk multiple documentation files (markdown, OpenAPI JSON, Python) in batch
   - Arguments: `paths` (list of strings)
-- **list-sources**: List all unique sources (file paths) that have been ingested and stored in memory
+- **list-sources**: List all unique sources (file paths) that have been ingested and stored in memory, with optional filtering by tag or semantic search.
+  - Arguments:
+    - `tag` (string, optional): Filter sources by tag in chunk metadata.
+    - `query` (string, optional): Semantic search query to find relevant sources.
+    - `top_k` (integer, optional, default 10): Number of top sources to return when using query.
 - **update-chunk-metadata**: Update the metadata field for a chunk by id
   - Arguments: `id` (integer), `metadata` (object)
 - **tag-chunks-by-source**: Adds specified tags to the metadata of all chunks associated with a given source (URL or file path). Merges with existing tags.

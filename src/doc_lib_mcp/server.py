@@ -348,7 +348,21 @@ async def handle_list_tools() -> list[types.Tool]:
             description="List all unique sources (file paths) that have been ingested and stored in memory.",
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional: Filter sources by tag in chunk metadata."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional: Semantic search query to find relevant sources."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Optional: Number of top sources to return when using query.",
+                        "default": 10
+                    }
+                },
                 "required": [],
             },
         ),
@@ -895,13 +909,70 @@ async def handle_call_tool(
         return [types.TextContent(type="text", text="\n".join(results))]
 
     elif name == "list-sources":
-        # Query the database for unique sources
+        tag = arguments.get("tag")
+        query = arguments.get("query")
+        top_k = arguments.get("top_k", 10) # Default top_k for sources
+
         conn = get_db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT source FROM chunks")
-        sources = [row[0] for row in cur.fetchall()]
+        # Use RealDictCursor for easier access to columns by name
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        sources = []
+
+        if query:
+            # Perform semantic search and get distinct sources from top results
+            try:
+                query_emb = (await embed_texts([query]))[0]
+                embedding_str = "[" + ",".join(str(x) for x in query_emb) + "]"
+
+                # Select source and distance, order by distance, then get distinct sources in Python
+                sql_query = "SELECT source, embedding <=> %s AS distance FROM chunks"
+                params = [embedding_str]
+                where_clauses = []
+
+                if tag:
+                    where_clauses.append("metadata->'tags' @> %s")
+                    params.append(json.dumps([tag]))
+
+                if where_clauses:
+                    sql_query += " WHERE " + " AND ".join(where_clauses)
+
+                # Order by distance and limit to get relevant chunks
+                sql_query += " ORDER BY distance LIMIT %s"
+                params.append(top_k * 10) # Fetch more chunks to ensure enough unique sources
+
+                cur.execute(sql_query, tuple(params))
+                # Get distinct sources from the limited results, maintaining order by first appearance
+                fetched_rows = cur.fetchall()
+                seen_sources = set()
+                sources = []
+                for row in fetched_rows:
+                    if row['source'] not in seen_sources:
+                        sources.append(row['source'])
+                        seen_sources.add(row['source'])
+                    if len(sources) >= top_k: # Stop once we have top_k unique sources
+                        break
+
+            except Exception as e:
+                 return [types.TextContent(type="text", text=f"Semantic search failed: {e}")]
+
+        elif tag:
+            # Filter by tag only
+            sql_query = "SELECT DISTINCT source FROM chunks WHERE metadata->'tags' @> %s"
+            params = [json.dumps([tag])]
+            cur.execute(sql_query, tuple(params))
+            sources = [row[0] for row in cur.fetchall()]
+
+        else:
+            # List all unique sources (original behavior)
+            cur.execute("SELECT DISTINCT source FROM chunks")
+            sources = [row[0] for row in cur.fetchall()]
+
         cur.close()
         conn.close()
+
+        if not sources:
+            return [types.TextContent(type="text", text="No sources found matching criteria.")]
+
         # Wrap each source in TextContent to conform to MCP protocol
         return [
             types.TextContent(type="text", text=source)

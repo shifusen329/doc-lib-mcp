@@ -16,7 +16,8 @@ dependencies = [
     "readability-lxml",
     "mistune>=3.0.0",
     "openai",
-    "pypandoc" # Added for Pandoc integration
+    "pypandoc",
+    "lxml[html_clean]" # Added for Pandoc integration
 ]
 [[project.authors]]
 name = "shifusen329"
