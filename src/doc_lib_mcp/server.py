@@ -999,9 +999,7 @@ async def handle_call_tool(
                     f"ID: {row['id']}\n"
                     f"Source: {row['source']}\n"
                     f"Type: {row['type']}\n"
-                    f"Location: {row['location']}\n"
-                    f"Content:\n{row['content']}\n"
-                    f"Metadata: {json.dumps(row['metadata'])}"
+                    f"Content:\n{row['content']}"
                 )
             )
             for row in results
@@ -1105,25 +1103,33 @@ async def handle_call_tool(
                 "original_file": file_name,
                 "mime_type": mime_type,
             }
-            # Step 2: Construct prompt
-            default_prompt = (
-                "You are an AI assistant. Extract all content from the document that would help another AI assistant understand and reason about the subject matter. "
-                "Include any code blocks, configuration examples, markdown structure, headers, and technical definitions. "
-                "Do not include commentary, summaries, or explanations. Do not add any formatting beyond what is already present in the original document. "
-                "Do not wrap the output in a ```json or any other fenced code block at the top level—just output the raw content. "
-                "Prioritize:\n"
-                "- Model/configuration definitions\n"
-                "- Code blocks and function calls\n"
-                "- Tokenization and preprocessing steps\n"
-                "- CLI commands or environment setup\n"
-                "- Training, fine-tuning, or inference pipelines\n"
-                "- Hyperparameters and checkpointing information\n"
-                "- Data transformation logic\n"
-                "- Architectural diagrams or markdown lists of components\n"
-                "Return only what is technically relevant, preserving all code, markdown structure, and formatting. "
-                "Strip any editorial content unless it is part of an instructional section."
-            )
-            user_prompt = prompt if prompt else default_prompt
+            # Step 2: Use the new custom prompt
+            custom_prompt = """You are an AI assistant. Extract only the technically relevant content from this markdown document for another AI assistant to learn and reason about the subject. 
+
+                Return your response in valid and clean **markdown format**—preserving all headers (`#`, `##`, `###`), bullet lists, numbered lists, bold/italic formatting, and fenced code blocks (```) exactly as in the source.
+
+                Strictly include:
+                - All code blocks (scripts, function definitions, shell commands)
+                - Markdown headers and section structure
+                - Configuration files or `.env` settings
+                - Environment setup steps
+                - Model definitions or configuration logic
+                - Preprocessing/tokenization instructions
+                - Training, fine-tuning, inference steps
+                - Hyperparameters, accuracy logs, tuning commands
+                - Any tables or markdown-formatted datasets
+
+                Exclude:
+                - Explanations, summaries, and commentary
+                - External links or references unless part of setup commands
+                - Any content not part of a technical instruction or configuration
+
+                **Do not** wrap the output in `json`, `yaml`, or any other fenced block beyond standard code blocks.
+                **Do not** include your own headings or explanations.
+                Just return clean markdown that can be parsed directly by pandoc +sourcepos
+                """
+            # Use the custom prompt, ignoring the 'prompt' argument from the tool call
+            user_prompt_text = custom_prompt
 
             # Step 3: Call Gemini 2.0 Flash 001 via OpenAI-compatible API
             try:
@@ -1136,7 +1142,7 @@ async def handle_call_tool(
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": f"{user_prompt}\n\n---\n\n{file_content}"}
+                            {"type": "text", "text": f"{user_prompt_text}\n\n---\n\n{file_content}"}
                         ]
                     }
                 ]
@@ -1146,22 +1152,52 @@ async def handle_call_tool(
                     n=1,
                     max_tokens=2048,
                 )
-                gemini_content = response.choices[0].message.content
+                # Support both OpenAI and Gemini response formats
+                choice = response.choices[0]
+                gemini_content = None
+                # Try dict access first (for compatibility with most OpenAI clients)
+                if isinstance(choice, dict):
+                    if "message" in choice and "content" in choice["message"]:
+                        gemini_content = choice["message"]["content"]
+                    elif "text" in choice:
+                        gemini_content = choice["text"]
+                # Try attribute access (for pydantic/other clients)
+                elif hasattr(choice, "message") and hasattr(choice.message, "content"):
+                    gemini_content = choice.message.content
+                elif hasattr(choice, "text"):
+                    gemini_content = choice.text
+                if not gemini_content:
+                    # Log the full choice object for debugging
+                    import json as _json
+                    try:
+                        with open("/tmp/smart_ingestion_gemini_response.log", "w") as logf:
+                            logf.write(_json.dumps(choice, default=str, indent=2))
+                    except Exception:
+                        pass
+                    return [types.TextContent(type="text", text=f"Gemini response missing content. Raw choice object: {repr(choice)}")]
             except Exception as e:
                 return [types.TextContent(type="text", text=f"Failed to get Gemini response: {e}")]
 
-            import json as _json
-            import re
-            # Robustly strip only the initial ```json and final ``` if present (line-based)
-            lines = gemini_content.splitlines()
-            if lines and re.match(r"^```json\s*$", lines[0], re.IGNORECASE):
-                lines = lines[1:]
-            if lines and re.match(r"^```\s*$", lines[-1]):
-                lines = lines[:-1]
-            cleaned_content = "\n".join(lines).strip()
-            # Pass the extracted content to the markdown chunker before embedding
-            from .chunkers import chunk_markdown
-            chunks = chunk_markdown(gemini_content, source=path)
+            # Remove leading ```markdown and trailing ``` if present
+            cleaned_content = gemini_content.strip()
+            if cleaned_content.startswith("```markdown"):
+                # Find the first newline after ```markdown
+                first_newline = cleaned_content.find('\n')
+                if first_newline != -1:
+                    cleaned_content = cleaned_content[first_newline + 1:].strip()
+
+            if cleaned_content.endswith("```"):
+                 # Find the last newline before the closing fence
+                 last_newline = cleaned_content.rfind('\n```')
+                 if last_newline != -1:
+                     cleaned_content = cleaned_content[:last_newline].strip()
+                 else:
+                     # Handle cases with no newlines before the end fence
+                     cleaned_content = cleaned_content[:-3].strip()
+
+
+            # Pass the extracted content to the markdown chunker
+            chunks = chunk_markdown(cleaned_content, source=path)
             if not chunks:
                 return [types.TextContent(type="text", text="No content found to ingest from Gemini extraction.")]
             embeddings = await embed_texts([chunk["content"] for chunk in chunks])

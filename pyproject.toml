@@ -15,7 +15,8 @@ dependencies = [
     "playwright",
     "readability-lxml",
     "mistune>=3.0.0",
-    "openai"
+    "openai",
+    "pypandoc" # Added for Pandoc integration
 ]
 [[project.authors]]
 name = "shifusen329"

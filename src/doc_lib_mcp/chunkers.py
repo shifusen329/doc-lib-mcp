@@ -1,117 +1,177 @@
 import re
 import ast
 from typing import List, Dict, Any
+import json
+import pypandoc # Use pypandoc
+import subprocess # Needed if pypandoc fails or for direct calls
 
+# Helper function to extract text from Pandoc AST inline elements
+def stringify_inline(inlines):
+    result = []
+    for inline in inlines:
+        if inline['t'] == 'Str':
+            result.append(inline['c'])
+        elif inline['t'] == 'Code':
+            result.append(f"`{inline['c'][1]}`")
+        elif inline['t'] == 'Emph':
+            result.append(f"*{stringify_inline(inline['c'])}*")
+        elif inline['t'] == 'Strong':
+            result.append(f"**{stringify_inline(inline['c'])}**")
+        elif inline['t'] == 'Strikeout':
+            result.append(f"~~{stringify_inline(inline['c'])}~~")
+        elif inline['t'] == 'Link':
+            link_text = stringify_inline(inline['c'][1])
+            url = inline['c'][2][0]
+            title = inline['c'][2][1]
+            title_str = f' "{title}"' if title else ""
+            result.append(f"[{link_text}]({url}{title_str})")
+        elif inline['t'] == 'Image':
+            alt_text = stringify_inline(inline['c'][1])
+            url = inline['c'][2][0]
+            title = inline['c'][2][1]
+            title_str = f' "{title}"' if title else ""
+            result.append(f"![{alt_text}]({url}{title_str})")
+        elif inline['t'] == 'Space':
+            result.append(' ')
+        elif inline['t'] == 'SoftBreak':
+            result.append('\n')
+        elif inline['t'] == 'LineBreak':
+            result.append('  \n')
+        # Add other inline types as needed (RawInline, Math, etc.)
+    return "".join(result)
+
+# Heading and Code Block based chunk_markdown
 def chunk_markdown(text: str, source: str) -> List[Dict[str, Any]]:
     """
-    Split markdown text into chunks by headings (##, #) or paragraphs,
-    and also extract code blocks as dedicated code chunks (non-redundantly).
-    Handles nested code blocks robustly using mistune's AST parser.
-    Each chunk includes content, type, source, location, and metadata.
+    Split markdown text into chunks based on headings (H1, H2, H3) and fenced code blocks.
+    Includes content before the first heading/code block.
     """
-    import mistune
-    import re
-
-    # Parse markdown into AST (mistune 3.x)
-    markdown = mistune.create_markdown(renderer='ast')
-    ast = markdown(text)
-
-    code_blocks = []
-    code_spans = []
-    # Traverse AST to extract only top-level code blocks
-    def extract_code_blocks(ast_nodes, parent_heading=None, offset=0):
-        for node in ast_nodes:
-            if node["type"] == "block_code" and "text" in node:
-                code_content = node["text"].strip()
-                if code_content and any(line.strip() for line in code_content.splitlines()):
-                    meta = {"code_tag": True}
-                    lang = node.get("info", None)
-                    if lang:
-                        meta["language"] = lang.strip()
-                        if lang.strip().endswith(".py") or lang.strip().startswith("."):
-                            meta["filename"] = lang.strip()
-                    if parent_heading:
-                        meta["parent_heading"] = parent_heading
-                    code_blocks.append({
-                        "content": code_content,
-                        "type": "code",
-                        "source": source,
-                        "location": f"code:{len(code_blocks)+1}",
-                        "metadata": meta
-                    })
-            elif node["type"] == "heading":
-                # Pass heading text to children
-                heading_text = node["children"][0]["text"].strip() if node.get("children") and node["children"][0]["type"] == "text" else ""
-                extract_code_blocks(node.get("children", []), parent_heading=heading_text)
-            elif "children" in node:
-                extract_code_blocks(node["children"], parent_heading=parent_heading)
-
-    extract_code_blocks(ast)
-
-    # New: Chunk by code blocks and headings, preserving markdown formatting
     chunks = []
-    code_block_pattern = re.compile(r"(```[\s\S]+?```)", re.MULTILINE)
-    last_end = 0
-    code_block_idx = 1
+    lines = text.splitlines()
+    current_markdown_chunk_lines = []
+    current_heading = None
+    current_heading_level = None
+    chunk_idx = 0
 
-    for match in code_block_pattern.finditer(text):
-        start, end = match.span()
-        # Narrative chunk before the code block
-        if start > last_end:
-            narrative = text[last_end:start].strip()
-            if narrative:
-                # Always preserve narrative as a markdown chunk, even if short or not separated by headings
+    # Regex to find headings (H1, H2, H3)
+    heading_regex = re.compile(r"^(#+)\s+(.*)$")
+    # Regex for fenced code block start, capturing language
+    fenced_code_start_regex = re.compile(r"^```+(\S*)$")
+    # Regex for fenced code block end
+    fenced_code_end_regex = re.compile(r"^```+\s*$")
+
+
+    in_fenced_code_block = False
+    fenced_code_lines = []
+    fenced_code_lang = None
+
+    def add_current_markdown_chunk():
+        nonlocal chunks, current_markdown_chunk_lines, current_heading, current_heading_level, chunk_idx
+        if current_markdown_chunk_lines:
+            content = "\n".join(current_markdown_chunk_lines).strip()
+            if content:
+                metadata = {}
+                location = f"chunk:{chunk_idx}"
+                if current_heading:
+                    metadata['heading'] = current_heading
+                    metadata['level'] = current_heading_level
+                    location = f"heading:{current_heading_level}:{current_heading}"
+
                 chunks.append({
-                    "content": narrative,
+                    "content": content,
                     "type": "markdown",
                     "source": source,
-                    "location": f"narrative:{last_end}-{start}",
-                    "metadata": {}
+                    "location": location,
+                    "metadata": metadata
                 })
-        # Code block chunk
-        code_block = match.group(1).strip()
-        if code_block:
-            chunks.append({
-                "content": code_block,
-                "type": "code",
-                "source": source,
-                "location": f"code:{code_block_idx}",
-                "metadata": {"code_tag": True}
-            })
-            code_block_idx += 1
-        last_end = end
+                chunk_idx += 1
+            current_markdown_chunk_lines = []
+            current_heading = None # Reset heading after adding chunk
+            current_heading_level = None # Reset level after adding chunk
 
-    # Any remaining narrative after the last code block
-    if last_end < len(text):
-        narrative = text[last_end:].strip()
-        if narrative:
-            heading_regex = re.compile(r'^(#{1,6} .+)$', re.MULTILINE)
-            heading_matches = list(heading_regex.finditer(narrative))
-            if heading_matches:
-                for i, hmatch in enumerate(heading_matches):
-                    hstart = hmatch.start()
-                    hend = heading_matches[i + 1].start() if i + 1 < len(heading_matches) else len(narrative)
-                    heading_chunk = narrative[hstart:hend].strip()
-                    if heading_chunk:
-                        chunks.append({
-                            "content": heading_chunk,
-                            "type": "markdown",
-                            "source": source,
-                            "location": f"heading:{hmatch.group(1).strip()}",
-                            "metadata": {"heading": hmatch.group(1).strip()}
-                        })
-            else:
-                paragraphs = [p.strip() for p in narrative.split('\n\n') if p.strip()]
-                for idx, para in enumerate(paragraphs):
+    for line in lines:
+        # Check for fenced code block start
+        fenced_code_start_match = fenced_code_start_regex.match(line)
+        if fenced_code_start_match and not in_fenced_code_block:
+            add_current_markdown_chunk() # Add any preceding text as a markdown chunk
+            in_fenced_code_block = True
+            fenced_code_lines.append(line)
+            fenced_code_lang = fenced_code_start_match.group(1) if fenced_code_start_match.group(1) else None
+            continue
+
+        # Check for fenced code block end
+        fenced_code_end_match = fenced_code_end_regex.match(line)
+        if fenced_code_end_match and in_fenced_code_block:
+            fenced_code_lines.append(line)
+            in_fenced_code_block = False
+            # Add the code block as a separate chunk
+            # Ensure we have at least a start and end fence before processing
+            if len(fenced_code_lines) >= 2:
+                # Include the fences in the chunk content for clarity
+                full_code_content = "\n".join(fenced_code_lines).strip()
+                if full_code_content:
+                    metadata = {"code_tag": True}
+                    if fenced_code_lang:
+                        metadata["language"] = fenced_code_lang
                     chunks.append({
-                        "content": para,
-                        "type": "markdown",
+                        "content": full_code_content,
+                        "type": "code",
                         "source": source,
-                        "location": f"paragraph:{idx+1}",
-                        "metadata": {}
+                        "location": f"code:{chunk_idx}",
+                        "metadata": metadata
                     })
+                    chunk_idx += 1
+            fenced_code_lines = []
+            fenced_code_lang = None
+            continue
+
+        # If in a fenced code block, just append the line
+        if in_fenced_code_block:
+            fenced_code_lines.append(line)
+            continue
+
+        # Check for headings if not in a code block
+        heading_match = heading_regex.match(line)
+        if heading_match:
+            level = len(heading_match.group(1))
+            if level <= 3: # Only chunk by H1, H2, H3
+                add_current_markdown_chunk() # Add content before this heading as a markdown chunk
+                current_heading = heading_match.group(2).strip()
+                current_heading_level = level
+                current_markdown_chunk_lines.append(line) # Include the heading line in the chunk
+                continue
+
+        # If not in a code block and not a heading, add to current markdown chunk lines
+        current_markdown_chunk_lines.append(line)
+
+
+    # Add the last markdown chunk if any lines remain and we are not in a code block
+    if not in_fenced_code_block:
+        add_current_markdown_chunk()
+    # If we end while still in a code block, the last lines are part of an unclosed block - handle as markdown?
+    elif fenced_code_lines:
+         chunks.append({
+             "content": "\n".join(fenced_code_lines).strip(),
+             "type": "markdown", # Treat as markdown if block is unclosed
+             "source": source,
+             "location": f"unclosed_code_block:{chunk_idx}",
+             "metadata": {"code_tag": True, "unclosed": True}
+         })
+         chunk_idx += 1
+
+
+    # Fallback if no chunks were created (e.g., empty file or only H4+ headings/malformed content)
+    if not chunks and text.strip():
+         chunks.append({
+             "content": text, "type": "markdown", "source": source,
+             "location": "full_fallback", "metadata": {"reason": "No chunks generated by heading/code logic"}
+         })
+
 
     return chunks
+
+
+# --- UNCHANGED FUNCTIONS BELOW ---
 
 def chunk_python(code: str, source: str) -> List[Dict[str, Any]]:
     """
