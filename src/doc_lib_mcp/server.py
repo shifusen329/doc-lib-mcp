@@ -1021,18 +1021,17 @@ async def handle_call_tool(
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         chunks_content = []
 
-        sql_query = "SELECT content, embedding <=> %s AS distance FROM chunks"
         params = []
         where_clauses = []
 
         if query:
+            sql_query = "SELECT content, embedding <=> %s AS distance FROM chunks"
             query_emb = (await embed_texts([query]))[0]
             embedding_str = "[" + ",".join(str(x) for x in query_emb) + "]"
             params.append(embedding_str)
-            # Order by distance if query is provided
             order_by = " ORDER BY distance"
         else:
-            # No query, no specific order needed for context
+            sql_query = "SELECT content FROM chunks"
             order_by = ""
 
         if tag:
