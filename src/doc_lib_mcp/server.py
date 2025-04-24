@@ -366,6 +366,33 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": [],
             },
         ),
+        types.Tool( # Added get-context tool definition
+            name="get-context",
+            description="Retrieve relevant content chunks (content only) for use as AI context, with filtering by tag, type, and semantic similarity.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The semantic search query."
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional: Filter results by a specific tag in chunk metadata."
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Optional: Filter results by chunk type (e.g., 'code', 'markdown')."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "The number of top relevant chunks to retrieve.",
+                        "default": 5
+                    }
+                },
+                "required": [],
+            },
+        ),
         types.Tool(
             name="update-chunk-metadata",
             description="Update the metadata field for a chunk by id. Arguments: id (integer), metadata (object).",
@@ -984,7 +1011,7 @@ async def handle_call_tool(
             for source in sources
         ]
 
-    elif name == "get-context":
+    elif name == "get-context": # Added get-context implementation
         query = arguments.get("query")
         tag = arguments.get("tag")
         filter_type = arguments.get("type")
