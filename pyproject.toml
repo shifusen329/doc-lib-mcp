@@ -1,0 +1,30 @@
+[project]
+name = "doc-lib-mcp"
+version = "0.1.0"
+description = "A Documentation RAG MCP"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.7.1",
+    "httpx>=0.27.0",
+    "asyncpg>=0.29.0",
+    "requests",
+    "python-dotenv"
+]
+[[project.authors]]
+name = "shifusen329"
+email = "quanhong329@gmail.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+doc-lib-mcp = "doc_lib_mcp:main"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/nightly/cu128"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
