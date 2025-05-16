@@ -4,6 +4,9 @@ import httpx
 import requests
 import asyncpg
 from dotenv import load_dotenv
+from FlagEmbedding import FlagReranker # Added for reranking
+import torch # For torch.cuda.empty_cache()
+import gc # For garbage collection
 
 # Load environment variables from .env
 load_dotenv()
@@ -15,6 +18,58 @@ rag_agent = os.environ.get("RAG_AGENT", "llama3")
 embedding_model = os.environ.get("OLLAMA_MODEL", "nomic-embed-text-v2-moe")
 generate_url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate"
 embed_url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/embeddings"
+
+# Reranker Configuration and State
+RERANKER_MODEL_PATH = os.environ.get("RERANKER_MODEL_PATH", "/srv/samba/fileshare2/AI/models/bge-reranker-v2-m3")
+RERANKER_USE_FP16 = os.environ.get("RERANKER_USE_FP16", "True").lower() == "true"
+
+reranker: FlagReranker | None = None
+
+def load_reranker_model_sync():
+    global reranker
+    if reranker is None:
+        try:
+            if os.path.exists(RERANKER_MODEL_PATH):
+                print(f"Loading reranker model from {RERANKER_MODEL_PATH} (fp16: {RERANKER_USE_FP16})...")
+                reranker = FlagReranker(RERANKER_MODEL_PATH, use_fp16=RERANKER_USE_FP16)
+                print(f"Successfully loaded reranker model from {RERANKER_MODEL_PATH}")
+                return True
+            else:
+                print(f"Warning: Reranker model path not found: {RERANKER_MODEL_PATH}. Reranking will be skipped.")
+                return False
+        except Exception as e:
+            print(f"Error loading reranker model from {RERANKER_MODEL_PATH}: {e}. Reranking will be skipped.")
+            reranker = None # Ensure reranker is None on failure
+            return False
+    return True # Already loaded
+
+async def load_reranker_model():
+    # Run the synchronous loading function in a thread pool executor
+    # to avoid blocking the asyncio event loop.
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, load_reranker_model_sync)
+
+
+def unload_reranker_model_sync():
+    global reranker
+    if reranker is not None:
+        print("Unloading reranker model after use.")
+        del reranker
+        reranker = None
+        if RERANKER_USE_FP16 and torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                print("Cleared CUDA cache.")
+            except Exception as e:
+                print(f"Error clearing CUDA cache: {e}")
+        gc.collect()
+        print("Reranker model unloaded and garbage collected.")
+
+async def unload_reranker_model():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, unload_reranker_model_sync)
+
+
 
 from mcp.server.models import InitializationOptions
 import mcp.types as types
@@ -117,8 +172,8 @@ async def handle_list_tools() -> list[types.Tool]:
     """
     return [
         types.Tool(
-            name="get-context",
-            description="Retrieve contextually relevant information from the embedding database and synthesize an answer using the RAG agent. Optionally filter or boost by tags.",
+            name="ask-question",
+            description="Ask a question and get a synthesized answer using the RAG agent and contextually relevant information from the embedding database. Optionally filter or boost by tags.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -127,6 +182,10 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional list of tags to filter or boost relevant chunks.",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Optional number of top results to return (default 10)."
                     },
                 },
                 "required": ["query"],
@@ -144,6 +203,26 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["input", "model"]
             },
         ),
+        types.Tool(
+            name="get-context",
+            description="Return the raw context chunks from the embedding database for a given query, without LLM interpretation. Optionally filter or boost by tags.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags to filter or boost relevant chunks.",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Optional number of top results to return (default 10)."
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
     ]
 
 @server.call_tool()
@@ -154,7 +233,7 @@ async def handle_call_tool(
     Handle tool execution requests.
     Tools can modify server state and notify clients of changes.
     """
-    if name == "get-context":
+    if name == "ask-question":
         if not arguments or "query" not in arguments:
             raise ValueError("Missing query argument")
         user_query = arguments["query"]
@@ -184,7 +263,7 @@ async def handle_call_tool(
         chunk_col = "chunk"
         embedding_col = "embedding"
         tags_col = "tags"
-        top_n = 5
+        top_n = arguments.get("top_n", 10)
 
         conn = await asyncpg.connect(
             host=db_host,
@@ -243,6 +322,119 @@ async def handle_call_tool(
                 text=answer,
             )
         ]
+    elif name == "get-context":
+        if not arguments or "query" not in arguments:
+            raise ValueError("Missing query argument")
+        user_query = arguments["query"]
+        tags = arguments.get("tags", None)
+
+        # Step 1: Get embedding for the query using Ollama API
+        resp = requests.post(
+            embed_url,
+            json={"model": embedding_model, "prompt": user_query},
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embedding = data.get("embedding", [])
+        embedding = "[" + ",".join(str(x) for x in embedding) + "]"
+
+        # Step 2: Query the embedding DB for top-N similar chunks
+        db_host = os.environ.get("HOST", "localhost")
+        db_port = os.environ.get("DB_PORT", "5432")
+        db_name = os.environ.get("DB_NAME", "doclibdb")
+        db_user = os.environ.get("DB_USER", "doclibdb_user")
+        db_password = os.environ.get("DB_PASSWORD", "doclibdb_password")
+        table_name = "embeddings"
+        chunk_col = "chunk"
+        tags_col = "tags"
+        embedding_col = "embedding"
+        top_n = arguments.get("top_n", 10)
+
+        conn = await asyncpg.connect(
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            database=db_name,
+        )
+
+        if tags:
+            sql = f"""
+                SELECT {chunk_col}, {tags_col}
+                FROM {table_name}
+                ORDER BY ({embedding_col}::vector <#> $1::vector) - (CASE WHEN {tags_col} && $2 THEN 0.2 ELSE 0 END)
+                LIMIT {top_n}
+            """
+            rows = await conn.fetch(sql, embedding, tags)
+        else:
+            sql = f"""
+                SELECT {chunk_col}, {tags_col}
+                FROM {table_name}
+                ORDER BY {embedding_col}::vector <#> $1::vector
+                LIMIT {top_n}
+            """
+            rows = await conn.fetch(sql, embedding)
+        await conn.close()
+
+        # Return the raw chunks as a list of TextContent objects (no tags)
+        
+        initial_chunks = [row[chunk_col] for row in rows]
+        
+        try:
+            # Always attempt to load the model for each request
+            print("Loading reranker model for this request...")
+            model_loaded_successfully = await load_reranker_model()
+
+            if model_loaded_successfully and reranker and initial_chunks:
+                print(f"Reranking {len(initial_chunks)} documents for query: '{user_query[:50]}...'")
+                # Prepare pairs for reranker: [query, passage]
+                rerank_pairs = [[user_query, chunk] for chunk in initial_chunks]
+                
+                try:
+                    # Compute scores
+                    # Run synchronous FlagEmbedding call in executor
+                    loop = asyncio.get_event_loop()
+                    scores = await loop.run_in_executor(None, reranker.compute_score, rerank_pairs, False) # normalize=False
+                    
+                    # Combine chunks with scores and sort
+                    scored_chunks = list(zip(initial_chunks, scores))
+                    scored_chunks.sort(key=lambda x: x[1], reverse=True) # Sort by score descending
+                    
+                    # Get top 5 reranked chunks
+                    reranked_chunks = [chunk for chunk, score in scored_chunks[:5]]
+                    print(f"Returning {len(reranked_chunks)} reranked documents.")
+                    
+                    return [
+                        types.TextContent(type="text", text=chunk)
+                        for chunk in reranked_chunks
+                    ]
+                except Exception as e:
+                    print(f"Error during reranking: {e}. Returning initial top 5 documents instead.")
+                    # Fallback to top 5 initial chunks if reranking fails
+                    return [
+                        types.TextContent(type="text", text=chunk)
+                        for chunk in initial_chunks[:5]
+                    ]
+            else:
+                if not model_loaded_successfully:
+                    print("Reranker model could not be loaded. Returning initial documents (up to 5).")
+                elif not reranker:
+                    print("Reranker not available. Returning initial documents (up to 5).")
+                elif not initial_chunks:
+                    print("No initial chunks to rerank.")
+                # If no reranker or no initial chunks, return initial chunks (up to 5)
+                return [
+                    types.TextContent(type="text", text=chunk)
+                    for chunk in initial_chunks[:5] # Return top 5 of initial if no reranking
+                ]
+        finally:
+            # Always unload the model after use, regardless of success or failure
+            if reranker:
+                print("Unloading reranker model after request completion")
+                await unload_reranker_model()
+
     elif name == "get-embedding":
         if not arguments or "input" not in arguments or "model" not in arguments:
             raise ValueError("Missing input or model argument")
@@ -268,17 +460,23 @@ async def handle_call_tool(
         raise ValueError(f"Unknown tool: {name}")
 
 async def main():
-    # Run the server using stdin/stdout streams
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="doc-lib-mcp",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    try:
+        # Run the server using stdin/stdout streams
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="doc-lib-mcp",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    finally:
+        # Ensure model is unloaded on shutdown if somehow still loaded
+        if reranker:
+            print("Unloading reranker model on server shutdown...")
+            await unload_reranker_model()

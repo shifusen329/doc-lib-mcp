@@ -1,6 +1,6 @@
 # doc-lib-mcp MCP server
 
-A Documentation RAG MCP
+A Documentation Retrieval Augmented Generation (RAG) MCP server that provides semantic search and question answering capabilities using vector embeddings.
 
 ## Components
 
@@ -19,14 +19,40 @@ The server provides a single prompt:
 
 ### Tools
 
-The server implements one tool:
-- add-note: Adds a new note to the server
-  - Takes "name" and "content" as required string arguments
-  - Updates server state and notifies clients of resource changes
+The server implements three tools:
+- ask-question: Ask a question and get a synthesized answer using the RAG agent and contextually relevant information from the embedding database
+  - Takes "query" as a required string argument
+  - Optional "tags" array to filter or boost relevant chunks
+  - Optional "top_n" integer to specify number of results to return
+  
+- get-embedding: Generate an embedding vector for the given input text using the Ollama API
+  - Takes "input" and "model" as required string arguments
+  
+- get-context: Return the raw context chunks from the embedding database for a given query, without LLM interpretation
+  - Takes "query" as a required string argument
+  - Optional "tags" array to filter or boost relevant chunks
+  - Optional "top_n" integer to specify number of results to return
 
 ## Configuration
 
-[TODO: Add configuration details specific to your implementation]
+The server requires the following environment variables (can be set in a .env file):
+
+### Ollama Configuration
+- OLLAMA_HOST: Hostname for Ollama API (default: localhost)
+- OLLAMA_PORT: Port for Ollama API (default: 11434)
+- RAG_AGENT: Ollama model to use for RAG responses (default: llama3)
+- OLLAMA_MODEL: Ollama model to use for embeddings (default: nomic-embed-text-v2-moe)
+
+### Database Configuration
+- HOST: PostgreSQL database host (default: localhost)
+- DB_PORT: PostgreSQL database port (default: 5432)
+- DB_NAME: PostgreSQL database name (default: doclibdb)
+- DB_USER: PostgreSQL database user (default: doclibdb_user)
+- DB_PASSWORD: PostgreSQL database password (default: doclibdb_password)
+
+### Reranker Configuration
+- RERANKER_MODEL_PATH: Path to the reranker model (default: /srv/samba/fileshare2/AI/models/bge-reranker-v2-m3)
+- RERANKER_USE_FP16: Whether to use FP16 for reranker (default: True)
 
 ## Quickstart
 
