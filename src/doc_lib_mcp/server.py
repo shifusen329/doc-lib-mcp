@@ -205,7 +205,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get-context",
-            description="Return the raw context chunks from the embedding database for a given query, without LLM interpretation. Optionally filter or boost by tags.",
+            description="Retrieves relevant documentation to provide Cline with context for project tasks. Optionally filter or boost by tags.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -349,6 +349,7 @@ async def handle_call_tool(
         table_name = "embeddings"
         chunk_col = "chunk"
         tags_col = "tags"
+        source_col = "source" # Added source column
         embedding_col = "embedding"
         top_n = arguments.get("top_n", 10)
 
@@ -362,7 +363,7 @@ async def handle_call_tool(
 
         if tags:
             sql = f"""
-                SELECT {chunk_col}, {tags_col}
+                SELECT {chunk_col}, {tags_col}, {source_col}
                 FROM {table_name}
                 ORDER BY ({embedding_col}::vector <#> $1::vector) - (CASE WHEN {tags_col} && $2 THEN 0.2 ELSE 0 END)
                 LIMIT {top_n}
@@ -370,7 +371,7 @@ async def handle_call_tool(
             rows = await conn.fetch(sql, embedding, tags)
         else:
             sql = f"""
-                SELECT {chunk_col}, {tags_col}
+                SELECT {chunk_col}, {tags_col}, {source_col}
                 FROM {table_name}
                 ORDER BY {embedding_col}::vector <#> $1::vector
                 LIMIT {top_n}
@@ -378,56 +379,73 @@ async def handle_call_tool(
             rows = await conn.fetch(sql, embedding)
         await conn.close()
 
-        # Return the raw chunks as a list of TextContent objects (no tags)
-        
-        initial_chunks = [row[chunk_col] for row in rows]
+        # Extract chunks, their tags, and source metadata
+        initial_results = [(row[chunk_col], row[tags_col], row[source_col]) for row in rows]
         
         try:
             # Always attempt to load the model for each request
             print("Loading reranker model for this request...")
             model_loaded_successfully = await load_reranker_model()
 
-            if model_loaded_successfully and reranker and initial_chunks:
-                print(f"Reranking {len(initial_chunks)} documents for query: '{user_query[:50]}...'")
-                # Prepare pairs for reranker: [query, passage]
-                rerank_pairs = [[user_query, chunk] for chunk in initial_chunks]
+            if model_loaded_successfully and reranker and initial_results:
+                print(f"Reranking {len(initial_results)} documents for query: '{user_query[:50]}...'")
+                # Prepare pairs for reranker: [query, passage_content]
+                # We only rerank based on chunk content
+                rerank_pairs = [[user_query, chunk_content] for chunk_content, _, _ in initial_results]
                 
                 try:
                     # Compute scores
-                    # Run synchronous FlagEmbedding call in executor
                     loop = asyncio.get_event_loop()
                     scores = await loop.run_in_executor(None, reranker.compute_score, rerank_pairs, False) # normalize=False
                     
-                    # Combine chunks with scores and sort
-                    scored_chunks = list(zip(initial_chunks, scores))
-                    scored_chunks.sort(key=lambda x: x[1], reverse=True) # Sort by score descending
+                    # Combine original results (chunk_content, tags, source) with scores
+                    scored_results = list(zip(initial_results, scores))
+                    # Sort by score descending
+                    scored_results.sort(key=lambda x: x[1], reverse=True) 
                     
-                    # Get top 5 reranked chunks
-                    reranked_chunks = [chunk for chunk, score in scored_chunks[:5]]
-                    print(f"Returning {len(reranked_chunks)} reranked documents.")
+                    # Get top 5 reranked results (chunk_content, tags, source pairs)
+                    reranked_results_tuples = [result_tuple for result_tuple, score in scored_results[:5]]
+                    print(f"Returning {len(reranked_results_tuples)} reranked documents with metadata.")
                     
+                    # Format output to include source metadata
+                    output_texts = []
+                    for chunk_content, _, source_metadata in reranked_results_tuples:
+                        source_str = source_metadata if source_metadata else "N/A"
+                        output_texts.append(f"Source: {source_str}\n\n{chunk_content}")
+                        
                     return [
-                        types.TextContent(type="text", text=chunk)
-                        for chunk in reranked_chunks
+                        types.TextContent(type="text", text=text)
+                        for text in output_texts
                     ]
                 except Exception as e:
-                    print(f"Error during reranking: {e}. Returning initial top 5 documents instead.")
-                    # Fallback to top 5 initial chunks if reranking fails
+                    print(f"Error during reranking: {e}. Returning initial top 5 documents with metadata instead.")
+                    # Fallback to top 5 initial results if reranking fails
+                    fallback_results_tuples = initial_results[:5]
+                    output_texts = []
+                    for chunk_content, _, source_metadata in fallback_results_tuples:
+                        source_str = source_metadata if source_metadata else "N/A"
+                        output_texts.append(f"Source: {source_str}\n\n{chunk_content}")
                     return [
-                        types.TextContent(type="text", text=chunk)
-                        for chunk in initial_chunks[:5]
+                        types.TextContent(type="text", text=text)
+                        for text in output_texts
                     ]
             else:
                 if not model_loaded_successfully:
-                    print("Reranker model could not be loaded. Returning initial documents (up to 5).")
+                    print("Reranker model could not be loaded. Returning initial documents (up to 5) with metadata.")
                 elif not reranker:
-                    print("Reranker not available. Returning initial documents (up to 5).")
-                elif not initial_chunks:
+                    print("Reranker not available. Returning initial documents (up to 5) with metadata.")
+                elif not initial_results:
                     print("No initial chunks to rerank.")
-                # If no reranker or no initial chunks, return initial chunks (up to 5)
+                
+                # If no reranker or no initial chunks, return initial chunks (up to 5) with metadata
+                fallback_results_tuples = initial_results[:5]
+                output_texts = []
+                for chunk_content, _, source_metadata in fallback_results_tuples:
+                    source_str = source_metadata if source_metadata else "N/A"
+                    output_texts.append(f"Source: {source_str}\n\n{chunk_content}")
                 return [
-                    types.TextContent(type="text", text=chunk)
-                    for chunk in initial_chunks[:5] # Return top 5 of initial if no reranking
+                    types.TextContent(type="text", text=text)
+                    for text in output_texts
                 ]
         finally:
             # Always unload the model after use, regardless of success or failure
