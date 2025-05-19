@@ -11,3 +11,10 @@ wheels/
 
 # Environment variables
 .env
+
+# Other ignores from remote
+doc-lib-mcp/
+langfuse-trimmed.html
+langfuse.html
+langfuse.md
+nextra-code.txt

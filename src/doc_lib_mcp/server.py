@@ -70,7 +70,6 @@ async def unload_reranker_model():
     await loop.run_in_executor(None, unload_reranker_model_sync)
 
 
-
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server

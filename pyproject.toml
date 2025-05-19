@@ -11,7 +11,17 @@ dependencies = [
     "requests",
     "python-dotenv",
     "FlagEmbedding",
-    "torch"
+    "torch",
+    "beautifulsoup4",
+    "lxml",
+    "anyio",
+    "psycopg2-binary",
+    "playwright",
+    "readability-lxml",
+    "mistune>=3.0.0",
+    "openai",
+    "pypandoc",
+    "lxml[html_clean]"
 ]
 [[project.authors]]
 name = "shifusen329"
