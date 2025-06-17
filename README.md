@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/shifusen329-doc-lib-mcp-badge.png)](https://mseep.ai/app/shifusen329-doc-lib-mcp)
+
 # doc-lib-mcp MCP server
 
 A Model Context Protocol (MCP) server for document ingestion, chunking, semantic search, and note management.
